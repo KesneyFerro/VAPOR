@@ -1,14 +1,34 @@
 """
-Create a test video with RGB patterns to verify channel filtering in the video processor
+Create a test video with RGB patterns to verify channel filtering in the video processor.
 """
 
 import cv2
 import numpy as np
 import os
+import sys
+from pathlib import Path
 
-def create_rgb_test_video():
-    """Create a test video with RGB color patterns"""
-    output_path = "rgb_test_video.mp4"
+# Add parent directories to path to import specularity modules
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
+from specularity.core.video_processor import VideoFrameProcessor
+
+
+def create_rgb_test_video(output_dir=None):
+    """
+    Create a test video with RGB color patterns.
+    
+    Args:
+        output_dir: Directory to save the test video (optional)
+        
+    Returns:
+        str: Path to the created video file
+    """
+    if output_dir is None:
+        output_dir = Path(__file__).parent.parent.parent / "data" / "videos"
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+    output_path = output_dir / "rgb_test_video.mp4"
     
     # Video properties
     width, height = 900, 400
@@ -18,7 +38,7 @@ def create_rgb_test_video():
     
     # Create video writer
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
     
     print(f"Creating test video: {output_path}")
     print(f"Frames: {total_frames}, Size: {width}x{height}")
@@ -58,10 +78,11 @@ def create_rgb_test_video():
     
     out.release()
     print(f"Test video created: {output_path}")
-    return output_path
+    return str(output_path)
+
 
 def test_video_with_processor():
-    """Test the created video with the VideoFrameProcessor"""
+    """Test the created video with the VideoFrameProcessor."""
     video_path = create_rgb_test_video()
     
     print("\nNow testing with VideoFrameProcessor...")
@@ -72,16 +93,17 @@ def test_video_with_processor():
     print("3. Press 'c' to advance frames, 'q' to quit")
     
     try:
-        from test import VideoFrameProcessor
         processor = VideoFrameProcessor(video_path)
         processor.process_video()
     except Exception as e:
         print(f"Error: {e}")
     finally:
-        # Clean up
-        if os.path.exists(video_path):
-            print(f"\nCleaning up test video: {video_path}")
+        # Ask user if they want to keep the test video
+        keep_video = input("\nKeep the test video? (y/n, default n): ").strip().lower()
+        if keep_video != 'y' and os.path.exists(video_path):
+            print(f"Cleaning up test video: {video_path}")
             os.remove(video_path)
+
 
 if __name__ == "__main__":
     test_video_with_processor()

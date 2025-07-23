@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-Test script to demonstrate the enhanced pipeline management functionality
+Test script for pipeline management functionality.
+Tests the enhanced pipeline management system.
 """
+
+import sys
+from pathlib import Path
+
+# Add parent directories to path to import specularity modules
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
+from specularity.utils.pipeline_manager import PipelineManager
 
 def test_pipeline_parsing():
     """Test the pipeline command parsing"""

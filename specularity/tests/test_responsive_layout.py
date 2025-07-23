@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """
-Test script to demonstrate the responsive display functionality
+Test script for responsive display functionality.
+Tests the responsive grid calculation and layout system.
 """
 
 import cv2
 import numpy as np
+import sys
+from pathlib import Path
+
+# Add parent directories to path to import specularity modules
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
+from specularity.core.display_manager import DisplayManager
 
 def test_responsive_grid():
     """Test the responsive grid calculation"""

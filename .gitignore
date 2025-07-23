@@ -46,7 +46,7 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
-# Project specific
+# Project specific - Videos
 *.mp4
 *.avi
 *.mov
@@ -56,6 +56,8 @@ Thumbs.db
 *.webm
 *.m4v
 *.3gp
+
+# Project specific - Audio
 *.mp3
 *.wav
 *.m4a
@@ -63,10 +65,44 @@ Thumbs.db
 *.ogg
 *.flac
 
+# Project specific - Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.tif
+*.svg
+*.ico
+*.webp
+
+# Project specific - Models and weights
+*.pth
+*.pt
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.model
+*.weights
+*.ckpt
+*.pb
+
+# Project specific - Data directories
+data/videos/
+data/extracted_frames/
+data/models/
+data/results/
+data/cache/
+
 # Temporary files
 *.tmp
 *.temp
 *.log
+*~
+.DS_Store
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -80,3 +116,13 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Machine Learning
+wandb/
+mlruns/
+.neptune/
+tensorboard_logs/
+
+# CUDA
+*.cudnn
+*.cuda
