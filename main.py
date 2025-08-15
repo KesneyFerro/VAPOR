@@ -28,8 +28,8 @@ def get_video_files(videos_dir):
 
 
 def select_video():
-    """Select a video from the videos directory."""
-    videos_dir = Path(__file__).parent / "data" / "videos"
+    """Select a video from the videos/original directory."""
+    videos_dir = Path(__file__).parent / "data" / "videos" / "original"
     
     # Normalize video filenames first
     print("Normalizing video filenames...")
@@ -39,8 +39,8 @@ def select_video():
     videos = get_video_files(videos_dir)
     
     if not videos:
-        print("\nNo videos found in data/videos directory.")
-        print("Please add video files to data/videos/ and run the program again.")
+        print("\nNo videos found in data/videos/original directory.")
+        print("Please add video files to data/videos/original/ and run the program again.")
         return None
     
     # Display available videos

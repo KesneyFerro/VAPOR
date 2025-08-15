@@ -30,9 +30,9 @@ class FrameExtractor:
         self.video_name = Path(video_path).stem
         
         if output_dir is None:
-            # Use default extracted_frames directory
+            # Use default extracted_frames/original directory
             script_dir = Path(__file__).parent
-            self.output_dir = script_dir.parent / "extracted_frames" / self.video_name
+            self.output_dir = script_dir.parent / "extracted_frames" / "original" / self.video_name
         else:
             self.output_dir = Path(output_dir) / self.video_name
         
