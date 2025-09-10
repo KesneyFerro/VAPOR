@@ -31,13 +31,18 @@ from typing import List, Tuple, Optional, Dict
 import math
 from scipy import signal
 
-# Add specularity modules to path
+# Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
-from specularity.utils.content_detection import find_content_bounds, crop_to_content
+
+# Import blur core modules
+from blur.core.effects import apply_blur_effect, get_supported_blur_types
+from blur.core.video import VideoConfig, VideoFrameExtractor, VideoReconstructor, list_video_files
+from blur.core.image import detect_optimal_crop_bounds, crop_to_content, pad_frame_to_size, get_image_files, find_content_bounds
+from blur.core import VideoSelector, ProcessingModeSelector, setup_project_paths, ensure_directories_exist, QualityMetricsLogger
 
 
 class VAPORPipeline:
-    """Unified VAPOR processing pipeline."""
+    """Unified VAPOR processing pipeline using shared core modules."""
     
     def __init__(self, stride: int = 1):
         """Initialize the pipeline.
@@ -45,10 +50,9 @@ class VAPORPipeline:
         Args:
             stride: Frame processing stride (1 = all frames, 2 = every 2nd frame, etc.)
         """
-        self.base_path = Path(__file__).parent.parent  # Go up one level since we'll be in blur folder
-        self.videos_path = self.base_path / "data" / "videos" / "original"
-        self.output_videos_path = self.base_path / "data" / "videos" / "blurred"
-        self.frames_base_path = self.base_path / "data" / "extracted_frames"
+        # Setup project paths using shared utility
+        self.paths = setup_project_paths()
+        ensure_directories_exist(self.paths)
         
         # Blur types and intensities
         self.blur_types = ["gaussian", "motion_blur", "outoffocus", "average", "median", "combined"]
@@ -57,164 +61,56 @@ class VAPORPipeline:
         # Processing options
         self.stride = stride  # Process every Nth frame (1 = all frames)
         
+        # Components
+        self.video_selector = VideoSelector(self.paths['videos_original'])
+        self.mode_selector = ProcessingModeSelector()
+        
         # Video properties (set during processing)
-        self.video_config = {}
+        self.video_config = None
         self.crop_bounds = None
         
     def get_python_executable(self):
         """Get the correct Python executable path for the virtual environment."""
         return "C:/Users/kesne/Documents/Webdev/MAPLE-25/VAPOR/venv/Scripts/python.exe"
     
-    def list_available_videos(self) -> List[Path]:
-        """List all available videos in the original directory."""
-        if not self.videos_path.exists():
-            print(f"[ERROR] Videos directory not found: {self.videos_path}")
-            return []
-        
-        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv'}
-        videos = []
-        
-        for file_path in self.videos_path.iterdir():
-            if file_path.is_file() and file_path.suffix.lower() in video_extensions:
-                videos.append(file_path)
-        
-        return sorted(videos)
-    
     def select_video(self) -> Optional[Path]:
-        """Interactive video selection."""
-        videos = self.list_available_videos()
+        """Interactive video selection using shared VideoSelector."""
+        selected_video = self.video_selector.select_video_interactive()
         
-        if not videos:
-            print("[ERROR] No videos found in data/videos/original/")
-            return None
+        if selected_video:
+            # Ask for processing options if stride not set via command line
+            self.stride = self.mode_selector.select_stride_interactive(self.stride)
         
-        print("\nAvailable videos:")
-        print("=" * 50)
-        for i, video in enumerate(videos, 1):
-            file_size = video.stat().st_size / (1024 * 1024)  # MB
-            print(f"{i:2d}. {video.name} ({file_size:.1f} MB)")
-        
-        while True:
-            try:
-                choice = input(f"\nSelect video (1-{len(videos)}): ").strip()
-                if not choice:
-                    continue
-                
-                index = int(choice) - 1
-                if 0 <= index < len(videos):
-                    selected_video = videos[index]
-                    
-                    # Ask for processing options if stride not set via command line
-                    if self.stride == 1:  # Default value, may want to change
-                        print(f"\nSelected: {selected_video.name}")
-                        print("\nProcessing options:")
-                        print("1. Full video (all frames) - SLOW but complete")
-                        print("2. Sample frames (every 10th frame) - FAST for testing")
-                        print("3. Sample frames (every 5th frame) - MEDIUM")
-                        print("4. Custom stride - specify your own")
-                        
-                        while True:
-                            mode = input("\nChoose processing mode (1-4): ").strip()
-                            if mode in ['1', '2', '3', '4']:
-                                if mode == '1':
-                                    self.stride = 1  # Process all frames
-                                elif mode == '2':
-                                    self.stride = 10  # Every 10th frame
-                                elif mode == '3':
-                                    self.stride = 5   # Every 5th frame
-                                else:  # mode == '4'
-                                    while True:
-                                        try:
-                                            custom_stride = int(input("Enter custom stride (1-50): "))
-                                            if 1 <= custom_stride <= 50:
-                                                self.stride = custom_stride
-                                                break
-                                            else:
-                                                print("Please enter a number between 1 and 50")
-                                        except ValueError:
-                                            print("Please enter a valid number")
-                                break
-                            print("Please enter 1, 2, 3, or 4")
-                    
-                    return selected_video
-                else:
-                    print(f"[ERROR] Please enter a number between 1 and {len(videos)}")
-            except ValueError:
-                print("[ERROR] Please enter a valid number")
-            except KeyboardInterrupt:
-                print("\n[CANCELLED] Operation cancelled by user")
-                return None
+        return selected_video
     
     def extract_video_config(self, video_path: Path) -> Dict:
-        """Extract video configuration for reconstruction."""
-        cap = cv2.VideoCapture(str(video_path))
-        
-        if not cap.isOpened():
-            raise ValueError(f"Cannot open video: {video_path}")
-        
-        config = {
-            'fps': cap.get(cv2.CAP_PROP_FPS),
-            'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-            'frame_count': int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
-            'fourcc': int(cap.get(cv2.CAP_PROP_FOURCC))
-        }
-        
-        cap.release()
+        """Extract video configuration for reconstruction using shared VideoConfig."""
+        video_config = VideoConfig(video_path)
+        config_dict = video_config.to_dict()
         
         print("Video configuration:")
-        print(f"  Resolution: {config['width']}x{config['height']}")
-        print(f"  FPS: {config['fps']:.2f}")
-        print(f"  Frame count: {config['frame_count']}")
+        print(f"  Resolution: {config_dict['width']}x{config_dict['height']}")
+        print(f"  FPS: {config_dict['fps']:.2f}")
+        print(f"  Frame count: {config_dict['frame_count']}")
         print(f"  Stride: {self.stride} (processing every {self.stride} frame{'s' if self.stride > 1 else ''})")
         
-        return config
+        return config_dict
     
     def detect_crop_bounds_once(self, video_path: Path) -> Optional[Tuple]:
-        """Detect crop bounds from first few frames to use for all processing."""
+        """Detect crop bounds using shared image processing utilities."""
         print("\n[STEP 1] Detecting optimal crop bounds...")
         
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            raise ValueError(f"Cannot open video: {video_path}")
+        bounds = detect_optimal_crop_bounds(video_path, sample_count=5)
         
-        # Sample frames from different parts of the video
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        sample_indices = [0, total_frames//4, total_frames//2, 3*total_frames//4, total_frames-1]
-        
-        all_bounds = []
-        
-        for frame_idx in sample_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            
-            if ret:
-                try:
-                    bounds = find_content_bounds(frame)
-                    all_bounds.append(bounds)
-                    print(f"  Frame {frame_idx}: bounds {bounds}")
-                except Exception as e:
-                    print(f"  Frame {frame_idx}: detection failed - {e}")
-        
-        cap.release()
-        
-        if not all_bounds:
+        if bounds:
+            print(f"  [OK] Final crop bounds: {bounds}")
+        else:
             print("  [WARNING] No valid crop bounds detected, using full frame")
-            return None
         
-        # Use the most restrictive bounds (smallest crop area)
-        min_top = max(b[0] for b in all_bounds)
-        min_left = max(b[1] for b in all_bounds) 
-        max_bottom = min(b[2] for b in all_bounds)
-        max_right = min(b[3] for b in all_bounds)
-        
-        final_bounds = (min_top, min_left, max_bottom, max_right)
-        print(f"  [OK] Final crop bounds: {final_bounds}")
-        
-        return final_bounds
+        return bounds
     
     def extract_and_process_frames(self, video_path: Path, video_name: str) -> bool:
-        """Extract all frames and apply all blur effects."""
+        """Extract all frames and apply all blur effects using shared utilities."""
         print("\n[STEP 2] Processing all frames with blur effects...")
         
         cap = cv2.VideoCapture(str(video_path))
@@ -231,11 +127,11 @@ class VAPORPipeline:
         frame_dirs = {}
         
         # Original frames directory
-        original_frames_dir = self.frames_base_path / "original" / video_name
+        original_frames_dir = self.paths['frames_original'] / video_name
         original_frames_dir.mkdir(parents=True, exist_ok=True)
         
         # Blurred frames directories
-        blurred_base_dir = self.frames_base_path / "blurred" / video_name
+        blurred_base_dir = self.paths['frames_blurred'] / video_name
         for blur_type in self.blur_types:
             for intensity in self.intensities:
                 dir_name = f"{blur_type}_{intensity}"
@@ -258,30 +154,33 @@ class VAPORPipeline:
                     failed_count += 1
                     continue
                 
-                # Save original frame first
+                # Save original frame first (apply cropping if available)
                 frame_filename = f"{video_name}_{frame_num:06d}.png"
                 original_frame_path = original_frames_dir / frame_filename
-                cv2.imwrite(str(original_frame_path), frame)
                 
-                # Apply crop bounds if available
-                cropped_frame = frame
+                # Apply crop bounds to original frame as well
+                original_frame_to_save = frame
                 if self.crop_bounds:
-                    top, left, bottom, right = self.crop_bounds
-                    cropped_frame = frame[top:bottom, left:right]
+                    original_frame_to_save = crop_to_content(frame, self.crop_bounds)
                 
-                # Apply all blur effects and intensities
+                cv2.imwrite(str(original_frame_path), original_frame_to_save)
+                
+                # Use the same cropped frame for blur effects
+                cropped_frame = original_frame_to_save
+                
+                # Apply all blur effects and intensities using shared blur engine
                 for blur_type in self.blur_types:
                     for intensity in self.intensities:
-                        # Apply blur
-                        blurred_frame = self.apply_blur_effect(cropped_frame, blur_type, intensity)
+                        # Apply blur using shared effect engine
+                        blurred_frame = apply_blur_effect(cropped_frame, blur_type, intensity)
                         
-                        # Save frame with proper numbering (use original frame number)
+                        # Save frame with proper numbering
                         frame_path = frame_dirs[f"{blur_type}_{intensity}"] / frame_filename
                         cv2.imwrite(str(frame_path), blurred_frame)
                 
                 processed_count += 1
                 
-                # Progress update (every 50 processed frames or at end)
+                # Progress update
                 if (i + 1) % 50 == 0 or i == frames_to_process - 1:
                     progress = (i + 1) / frames_to_process * 100
                     print(f"    Progress: {progress:.1f}% ({i + 1}/{frames_to_process})")
@@ -298,206 +197,58 @@ class VAPORPipeline:
         
         return processed_count > 0
     
-    def apply_blur_effect(self, image: np.ndarray, blur_type: str, intensity: str) -> np.ndarray:
-        """Apply specific blur effect to an image."""
-        if blur_type == "gaussian":
-            return self.apply_gaussian_blur(image, intensity)
-        elif blur_type == "motion_blur":
-            return self.apply_motion_blur(image, intensity)
-        elif blur_type == "outoffocus":
-            return self.apply_out_of_focus_blur(image, intensity)
-        elif blur_type == "average":
-            return self.apply_average_blur(image, intensity)
-        elif blur_type == "median":
-            return self.apply_median_blur(image, intensity)
-        elif blur_type == "combined":
-            return self.apply_combined_blur(image, intensity)
-        else:
-            return image
-    
-    def apply_gaussian_blur(self, image: np.ndarray, intensity: str) -> np.ndarray:
-        """Apply Gaussian blur."""
-        if intensity == "low":
-            kernel_size = (5, 5)
-            sigma = 1.5
-        else:  # high
-            kernel_size = (15, 15)
-            sigma = 5.0
-        return cv2.GaussianBlur(image, kernel_size, sigma)
-    
-    def apply_motion_blur(self, image: np.ndarray, intensity: str) -> np.ndarray:
-        """Apply motion blur with random angle."""        
-        if intensity == "low":
-            kernel_size = 10
-            # Random angle between 0-180 degrees for low intensity
-            angle = random.randint(0, 180)
-        else:  # high
-            kernel_size = 25
-            # Different random angle range for high intensity
-            angle = random.randint(0, 180)
-        
-        # Create motion blur kernel at specified angle
-        kernel = np.zeros((kernel_size, kernel_size))
-        
-        # Convert angle to radians
-        angle_rad = np.radians(angle)
-        
-        # Calculate direction vector
-        dx = np.cos(angle_rad)
-        dy = np.sin(angle_rad)
-        
-        # Create motion blur line
-        center = kernel_size // 2
-        for i in range(kernel_size):
-            offset = i - center
-            x = int(center + offset * dx)
-            y = int(center + offset * dy)
-            
-            # Check bounds
-            if 0 <= x < kernel_size and 0 <= y < kernel_size:
-                kernel[y, x] = 1
-        
-        # Normalize kernel
-        if np.sum(kernel) > 0:
-            kernel = kernel / np.sum(kernel)
-        else:
-            # Fallback to simple horizontal blur if kernel creation fails
-            kernel = np.zeros((kernel_size, kernel_size))
-            middle_row = kernel_size // 2
-            kernel[middle_row, :] = 1 / kernel_size
-        
-        return cv2.filter2D(image, -1, kernel)
-    
-    def apply_out_of_focus_blur(self, image: np.ndarray, intensity: str) -> np.ndarray:
-        """Apply out-of-focus blur."""
-        if intensity == "low":
-            radius = 3
-        else:  # high
-            radius = 8
-        
-        kernel_size = 2 * radius + 1
-        kernel = np.zeros((kernel_size, kernel_size))
-        
-        center = radius
-        for i in range(kernel_size):
-            for j in range(kernel_size):
-                distance = math.sqrt((i - center) ** 2 + (j - center) ** 2)
-                if distance <= radius:
-                    kernel[i, j] = 1
-        
-        kernel = kernel / np.sum(kernel)
-        
-        if len(image.shape) == 3:
-            blurred = np.zeros_like(image)
-            for channel in range(image.shape[2]):
-                blurred[:, :, channel] = signal.convolve2d(
-                    image[:, :, channel], kernel, mode='same', boundary='symm'
-                )
-            return blurred.astype(np.uint8)
-        else:
-            return signal.convolve2d(image, kernel, mode='same', boundary='symm').astype(np.uint8)
-    
-    def apply_average_blur(self, image: np.ndarray, intensity: str) -> np.ndarray:
-        """Apply average blur."""
-        if intensity == "low":
-            kernel_size = (5, 5)
-        else:  # high
-            kernel_size = (15, 15)
-        return cv2.blur(image, kernel_size)
-    
-    def apply_median_blur(self, image: np.ndarray, intensity: str) -> np.ndarray:
-        """Apply median blur."""
-        if intensity == "low":
-            kernel_size = 5
-        else:  # high
-            kernel_size = 15
-        return cv2.medianBlur(image, kernel_size)
-    
-    def apply_combined_blur(self, image: np.ndarray, intensity: str) -> np.ndarray:
-        """Apply combined blur: motion blur + out-of-focus blur + median blur."""
-        # Apply motion blur first
-        blurred = self.apply_motion_blur(image, intensity)
-        
-        # Apply out-of-focus blur
-        blurred = self.apply_out_of_focus_blur(blurred, intensity)
-        
-        # Apply median blur last (helps reduce noise)
-        blurred = self.apply_median_blur(blurred, intensity)
-        
-        return blurred
-    
-    def pad_frame_to_original_size(self, frame: np.ndarray) -> np.ndarray:
-        """Pad frame with black pixels to match original video dimensions."""
-        target_height = self.video_config['height']
-        target_width = self.video_config['width']
-        
-        if frame.shape[:2] == (target_height, target_width):
-            return frame
-        
-        frame_height, frame_width = frame.shape[:2]
-        
-        # Create black canvas
-        if len(frame.shape) == 3:
-            padded_frame = np.zeros((target_height, target_width, frame.shape[2]), dtype=frame.dtype)
-        else:
-            padded_frame = np.zeros((target_height, target_width), dtype=frame.dtype)
-        
-        # Center the frame
-        start_y = (target_height - frame_height) // 2
-        start_x = (target_width - frame_width) // 2
-        
-        # Handle oversized frames
-        if start_y < 0 or start_x < 0 or frame_height > target_height or frame_width > target_width:
-            scale = min(target_width / frame_width, target_height / frame_height)
-            new_width = int(frame_width * scale)
-            new_height = int(frame_height * scale)
-            frame = cv2.resize(frame, (new_width, new_height))
-            
-            start_y = (target_height - new_height) // 2
-            start_x = (target_width - new_width) // 2
-            frame_height, frame_width = new_height, new_width
-        
-        # Place frame in center
-        end_y = start_y + frame_height
-        end_x = start_x + frame_width
-        
-        if len(frame.shape) == 3:
-            padded_frame[start_y:end_y, start_x:end_x, :] = frame
-        else:
-            padded_frame[start_y:end_y, start_x:end_x] = frame
-            
-        return padded_frame
-    
-    def create_videos_from_frames(self, video_name: str) -> int:
-        """Create videos from all processed frame sets."""
+    def create_videos_from_frames(self, video_name: str, original_video_path: Path) -> int:
+        """Create videos from all processed frame sets using shared VideoReconstructor."""
         print("\n[STEP 3] Creating videos...")
         
         success_count = 0
         total_count = len(self.blur_types) * len(self.intensities)
         
-        # Ensure output directory exists
-        self.output_videos_path.mkdir(parents=True, exist_ok=True)
+        # Create video reconstructor with original video config
+        video_config = VideoConfig(original_video_path)
+        reconstructor = VideoReconstructor(video_config)
         
         for blur_type in self.blur_types:
             for intensity in self.intensities:
                 dir_name = f"{blur_type}_{intensity}"
-                frames_dir = self.frames_base_path / "blurred" / video_name / dir_name
+                frames_dir = self.paths['frames_blurred'] / video_name / dir_name
                 
                 if not frames_dir.exists():
                     print(f"    [SKIP] {dir_name}: No frames directory")
                     continue
                 
-                # Get frame files
-                frame_files = sorted(frames_dir.glob("*.png"))
+                # Get frame files using shared utility
+                frame_files = get_image_files(frames_dir)
                 if not frame_files:
                     print(f"    [SKIP] {dir_name}: No frames found")
                     continue
                 
+                # Process frames to match original video size
+                processed_frames_dir = frames_dir / "processed"
+                processed_frames_dir.mkdir(exist_ok=True)
+                
+                processed_files = []
+                for frame_file in frame_files:
+                    frame = cv2.imread(str(frame_file))
+                    if frame is None:
+                        continue
+                    
+                    # Pad frame to original video size
+                    padded_frame = pad_frame_to_size(
+                        frame, 
+                        self.video_config['width'], 
+                        self.video_config['height']
+                    )
+                    
+                    processed_frame_path = processed_frames_dir / frame_file.name
+                    cv2.imwrite(str(processed_frame_path), padded_frame)
+                    processed_files.append(processed_frame_path)
+                
                 # Create video
                 output_filename = f"{video_name}_{blur_type}_{intensity}.mp4"
-                output_path = self.output_videos_path / output_filename
+                output_path = self.paths['videos_blurred'] / output_filename
                 
-                if self.create_single_video(frame_files, output_path):
+                if reconstructor.create_video_from_frames(processed_files, output_path):
                     print(f"    [OK] {output_filename}")
                     success_count += 1
                 else:
@@ -506,49 +257,45 @@ class VAPORPipeline:
         print(f"  [OK] Video creation complete: {success_count}/{total_count} videos created")
         return success_count
     
-    def create_single_video(self, frame_files: List[Path], output_path: Path) -> bool:
-        """Create a single video from frame files."""
-        try:
-            fps = self.video_config['fps']
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            
-            video_writer = None
-            
-            for frame_file in frame_files:
-                # Load and pad frame
-                frame = cv2.imread(str(frame_file))
-                if frame is None:
-                    continue
-                
-                frame = self.pad_frame_to_original_size(frame)
-                
-                # Initialize video writer with first frame
-                if video_writer is None:
-                    height, width = frame.shape[:2]
-                    video_writer = cv2.VideoWriter(
-                        str(output_path), 
-                        fourcc, 
-                        fps, 
-                        (width, height)
-                    )
+    def calculate_quality_metrics(self, video_name: str) -> bool:
+        """Calculate quality metrics for all processed frames and create CSV files."""
+        print("\n[STEP 4] Calculating quality metrics...")
+        
+        # Initialize quality metrics logger
+        metrics_logger = QualityMetricsLogger(self.paths['frames_base'])
+        
+        # Process original frames
+        original_frames_dir = self.paths['frames_original'] / video_name
+        if original_frames_dir.exists():
+            print("  Processing original frames...")
+            metrics_logger.process_frames_directory(original_frames_dir, 'original')
+        
+        # Process all blurred frame sets
+        blurred_base_dir = self.paths['frames_blurred'] / video_name
+        if blurred_base_dir.exists():
+            for blur_type in self.blur_types:
+                for intensity in self.intensities:
+                    method_name = f"{blur_type}_{intensity}"
+                    frames_dir = blurred_base_dir / method_name
                     
-                    if not video_writer.isOpened():
-                        return False
-                
-                video_writer.write(frame)
-            
-            if video_writer is not None:
-                video_writer.release()
-                return True
-            
-            return False
-            
-        except Exception as e:
-            print(f"      Error: {e}")
+                    if frames_dir.exists():
+                        print(f"  Processing {method_name} frames...")
+                        metrics_logger.process_frames_directory(frames_dir, method_name)
+        
+        # Create summary CSV with mean and std deviation
+        print("  Creating summary statistics...")
+        summary_csv = metrics_logger.create_summary_csv(video_name, original_frames_dir)
+        
+        if summary_csv:
+            print("  [OK] Quality metrics analysis complete!")
+            print(f"    Summary CSV: {summary_csv}")
+            return True
+        else:
+            print("  [WARNING] No summary CSV created")
             return False
     
     def run_pipeline(self) -> bool:
-        """Run the complete pipeline."""
+        """Run the complete pipeline using shared VAPOR core modules."""
         print("VAPOR - Video Blur Processing Pipeline")
         print("=" * 60)
         
@@ -573,7 +320,10 @@ class VAPORPipeline:
                 return False
             
             # Create videos
-            success_count = self.create_videos_from_frames(video_name)
+            success_count = self.create_videos_from_frames(video_name, video_path)
+            
+            # Calculate quality metrics
+            self.calculate_quality_metrics(video_name)
             
             # Summary
             print("\n" + "=" * 60)
@@ -581,15 +331,15 @@ class VAPORPipeline:
             print("=" * 60)
             print(f"Processed video: {video_name}")
             print(f"Videos created: {success_count}")
-            print(f"Output videos: {self.output_videos_path}")
-            print(f"Extracted frames: {self.frames_base_path}")
+            print(f"Output videos: {self.paths['videos_blurred']}")
+            print(f"Extracted frames: {self.paths['frames_base']}")
             print(f"Stride used: {self.stride}")
             print("\nGenerated videos:")
             
             # List generated videos
             for blur_type in self.blur_types:
                 for intensity in self.intensities:
-                    video_file = self.output_videos_path / f"{video_name}_{blur_type}_{intensity}.mp4"
+                    video_file = self.paths['videos_blurred'] / f"{video_name}_{blur_type}_{intensity}.mp4"
                     if video_file.exists():
                         size_mb = video_file.stat().st_size / (1024 * 1024)
                         print(f"  - {video_file.name} ({size_mb:.1f} MB)")

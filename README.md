@@ -4,14 +4,25 @@ A comprehensive video analysis system designed for advanced medical imaging proc
 
 ## Technical Overview
 
-VAPOR is structured as a modular system for processing and analyzing video data, with an initial focus on the impact of video quality (specifically blur) on 3D reconstruction quality. The system implements several key components:
+VAPOR is structured as a modular system with shared core utilities for processing and analyzing video data. The system implements several key components with an initial focus on the impact of video quality (specifically blur) on 3D reconstruction quality.
+
+### Core Architecture
+
+The blur module features a unified **core architecture** that provides specialized utilities for blur processing:
+
+- **blur/core/effects/**: Unified blur effects engine with 6+ blur types and configurable intensities
+- **blur/core/video/**: Video processing utilities (extraction, reconstruction, configuration)
+- **blur/core/image/**: Image processing utilities with advanced diagonal corner detection
+- **blur/core/utils.py**: Common pipeline utilities and path management
+
+This architecture eliminates code duplication within the blur module and ensures consistent behavior. Legacy modules have been cleaned up to redirect to blur.core implementations.
 
 ### 1. Blur Generation and Analysis Pipeline
 
-The blur module provides a systematic approach to generating controlled blur effects on video frames. This is essential for evaluating deblurring algorithms and analyzing how different types of blur affect reconstruction quality. The implemented blur types include:
+The blur module provides a systematic approach to generating controlled blur effects on video frames using the shared blur.core utilities. The implemented blur types include:
 
 - **Gaussian Blur**: Simulates lens defocus with a normal distribution kernel
-- **Motion Blur**: Simulates camera or object movement during exposure
+- **Motion Blur**: Simulates camera or object movement with random angles
 - **Out-of-Focus Blur**: Simulates optical defocus with a circular kernel
 - **Average Blur**: Simple box filter blur
 - **Median Blur**: Non-linear blur that preserves edges
@@ -19,31 +30,24 @@ The blur module provides a systematic approach to generating controlled blur eff
 
 Each blur type is implemented with both low and high intensity settings to provide a range of testing conditions.
 
-### 2. Content Detection System
+### 2. Content Detection and Frame Processing
 
-The system incorporates automatic content detection to:
-
-1. Identify regions of interest in video frames
-2. Apply optimized cropping to focus processing on relevant areas
-3. Maintain proper aspect ratios and sizing during processing
-4. Efficiently handle multi-frame processing with consistent parameters
-
-Content detection utilizes adaptive thresholding and contour analysis to determine optimal crop boundaries across video frames.
+The system features automatic content detection with diagonal corner analysis for accurate cropping bounds across multiple frame samples.
 
 ### 3. Frame Extraction and Processing
 
-VAPOR implements robust frame extraction with:
+VAPOR implements robust frame extraction with the shared video processing utilities:
 
 - Configurable frame stride for variable processing density
-- Parallel extraction of original and processed frames
+- Parallel extraction of original and processed frames using shared blur engine
 - Proper frame indexing for reconstruction
 - Structured directory organization for efficient data management
 
 ### 4. Video Reconstruction
 
-The system preserves video quality characteristics through:
+The system preserves video quality characteristics through shared utilities:
 
-- Original frame size maintenance with black padding
+- Original frame size maintenance with intelligent padding
 - Consistent framerate and codec application
 - Proper metadata transfer from source to output
 - Quality preservation during compression
@@ -57,9 +61,20 @@ VAPOR/
 ├── main.py                        # Project entry point
 ├── blur/                          # Blur generation module
 │   ├── main.py                    # Blur pipeline implementation
-│   ├── blurring/                  # Blur effect implementations
-│   │   ├── batch_blur.py          # Batch processing functions
-│   │   └── blur_effects.py        # Individual blur algorithms
+│   ├── core/                      # Blur processing core utilities
+│   │   ├── __init__.py            # Core module interface
+│   │   ├── utils.py               # Common pipeline utilities
+│   │   ├── effects/               # Unified blur effects engine
+│   │   │   ├── __init__.py
+│   │   │   └── blur_effects.py    # Blur implementations
+│   │   ├── video/                 # Video processing utilities
+│   │   │   ├── __init__.py
+│   │   │   └── processing.py      # Video handling and reconstruction
+│   │   └── image/                 # Image processing utilities
+│   │       ├── __init__.py
+│   │       └── processing.py      # Cropping, padding, content detection
+│   ├── blurring/                  # Blur module interface
+│   │   └── __init__.py            # Redirects to blur.core.effects
 │   └── deblurring/                # Future deblurring algorithms
 ├── specularity/                   # Specularity detection module
 │   ├── core/                      # Core processing classes
@@ -67,7 +82,7 @@ VAPOR/
 │   │   ├── frame_operations.py    # Image manipulation operations
 │   │   └── display_manager.py     # Grid display and UI management
 │   ├── utils/                     # Utility functions
-│   │   ├── content_detection.py   # Content bounds detection
+│   │   ├── content_detection.py   # Legacy - redirects to blur.core.image
 │   │   └── pipeline_manager.py    # Pipeline management
 │   ├── examples/                  # Usage examples
 │   └── tests/                     # Test modules
@@ -95,16 +110,19 @@ VAPOR/
 The blur generation pipeline processes videos through several stages:
 
 1. **Video Selection and Configuration**:
+
    - Interactive user selection of source videos
    - Configurable frame stride for processing density
    - Automatic video property extraction (resolution, FPS, frame count)
 
 2. **Content Detection**:
+
    - Adaptive sampling of video frames for content bounds detection
    - Statistical analysis to determine optimal crop region
    - Single-pass detection to ensure consistent processing
 
 3. **Frame Processing**:
+
    - Systematic extraction of frames at specified stride
    - Storage of original frames for reference
    - Application of 6 blur types at 2 intensity levels (12 variations)
@@ -123,17 +141,19 @@ The system uses several key technologies:
 - **NumPy**: Efficient numerical operations on frame data
 - **SciPy**: Advanced filter implementations for specialized blur effects
 - **Pathlib**: Modern file system operations
-- **Multi-processing**: Parallel processing capabilities for performance
+- **Shared Core Architecture**: Modular design with reusable components
 
 ## Installation
 
 1. Clone the repository:
+
 ```bash
 git clone https://github.com/KesneyFerro/VAPOR.git
 cd VAPOR
 ```
 
 2. Create and activate a virtual environment:
+
 ```bash
 # Windows
 python -m venv venv
@@ -145,6 +165,7 @@ source venv/bin/activate
 ```
 
 3. Install dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -153,7 +174,7 @@ pip install -r requirements.txt
 
 ### Blur Generation Pipeline
 
-To generate blurred videos with various effects:
+To generate blurred videos with various effects using the unified pipeline:
 
 ```bash
 # Process all frames
@@ -167,18 +188,43 @@ python blur/main.py --stride 10
 ```
 
 The pipeline will:
+
 1. Present available videos from `data/videos/original/`
 2. Let you choose a video and processing density
-3. Extract frames and apply multiple blur effects
-4. Create blurred videos and store extracted frames
+3. Use advanced diagonal corner detection for optimal cropping
+4. Extract frames and apply multiple blur effects using blur.core
+5. Create blurred videos and store extracted frames
+
+### Using Blur Core Modules
+
+The blur module uses a unified core architecture for processing:
+
+```python
+# Import blur effects (replaces old blur/blurring/blur_effects.py)
+from blur.core.effects import apply_blur_effect, BlurEffectsEngine
+
+# Import video processing utilities
+from blur.core.video import VideoConfig, VideoFrameExtractor, VideoReconstructor
+
+# Import image processing utilities (with advanced diagonal corner detection)
+from blur.core.image import find_content_bounds, crop_to_content, pad_frame_to_size
+
+# Import pipeline utilities
+from blur.core import VideoSelector, ProcessingModeSelector, setup_project_paths
+
+# Legacy modules redirect to blur.core (for backward compatibility)
+from blur.blurring import BlurEffects  # Now imports from blur.core.effects
+```
 
 ### Frame Management
 
 Extracted frames are stored in:
+
 - Original frames: `data/extracted_frames/original/{video_name}/`
 - Blurred frames: `data/extracted_frames/blurred/{video_name}/{blur_type}_{intensity}/`
 
 Resulting videos are stored in:
+
 - `data/videos/blurred/`
 
 ## Evaluation Metrics and Analysis
@@ -188,6 +234,7 @@ The current implementation includes the groundwork for comprehensive blur qualit
 ### Current Blur Assessment Framework
 
 1. **Visual Comparison**:
+
    - Side-by-side comparison of original, blurred, and deblurred frames
    - Evaluation of detail preservation across different blur types
    - Analysis of blur intensity effects on feature detection
