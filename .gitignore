@@ -97,6 +97,12 @@ data/models/
 data/results/
 data/cache/
 
+# Project specific - Metrics and CSV files
+*.csv
+data/frames/*.csv
+*_metrics.csv
+*metrics*.csv
+
 # Temporary files
 *.tmp
 *.temp
@@ -126,3 +132,6 @@ tensorboard_logs/
 # CUDA
 *.cudnn
 *.cuda
+
+
+roadmap.md

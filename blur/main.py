@@ -34,11 +34,10 @@ from scipy import signal
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
-# Import blur core modules
-from blur.core.effects import apply_blur_effect, get_supported_blur_types
-from blur.core.video import VideoConfig, VideoFrameExtractor, VideoReconstructor, list_video_files
-from blur.core.image import detect_optimal_crop_bounds, crop_to_content, pad_frame_to_size, get_image_files, find_content_bounds
-from blur.core import VideoSelector, ProcessingModeSelector, setup_project_paths, ensure_directories_exist, QualityMetricsLogger
+# Import required modules from their actual locations
+from blur.fx_01_blur.effects.blur_engine import EnhancedBlurEffects
+from utils.core_utilities import VideoConfig, crop_to_content, pad_frame_to_size, get_image_files, find_content_bounds_diagonal
+from data.scripts.video_reconstructor import VideoReconstructor
 
 
 class VAPORPipeline:
