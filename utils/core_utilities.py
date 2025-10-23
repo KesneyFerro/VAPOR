@@ -108,7 +108,7 @@ def find_matching_videos(videos_dir: Path, pattern: str) -> List[Path]:
 # ROI Detection with Diagonal Method
 # =============================================================================
 
-def find_content_bounds_diagonal(frame: np.ndarray) -> Tuple[int, int, int, int]:
+def find_content_bounds_diagonal(frame: np.ndarray, threshold: int = 15) -> Tuple[int, int, int, int]:
     """
     Find the bounds of non-black content using advanced diagonal corner detection.
     
@@ -117,6 +117,7 @@ def find_content_bounds_diagonal(frame: np.ndarray) -> Tuple[int, int, int, int]
     
     Args:
         frame: Input frame (BGR or grayscale)
+        threshold: Pixel intensity threshold (default 15) - pixels below this are considered black/inactive
         
     Returns:
         tuple: (top_bound, left_bound, bottom_bound, right_bound)
@@ -133,46 +134,49 @@ def find_content_bounds_diagonal(frame: np.ndarray) -> Tuple[int, int, int, int]
     # Top edge going down from center
     top_bound = 0
     for y in range(h):
-        if gray[y, w//2] > 0:  # Non-black pixel
+        if gray[y, w//2] > threshold:  # Non-black pixel (above threshold)
             top_bound = y
             break
     
     # Bottom edge going up from center
     bottom_bound = h - 1
     for y in range(h-1, -1, -1):
-        if gray[y, w//2] > 0:  # Non-black pixel
+        if gray[y, w//2] > threshold:  # Non-black pixel (above threshold)
             bottom_bound = y
             break
     
     # Left edge going right from center
     left_bound = 0
     for x in range(w):
-        if gray[h//2, x] > 0:  # Non-black pixel
+        if gray[h//2, x] > threshold:  # Non-black pixel (above threshold)
             left_bound = x
             break
     
     # Right edge going left from center
     right_bound = w - 1
     for x in range(w-1, -1, -1):
-        if gray[h//2, x] > 0:  # Non-black pixel
+        if gray[h//2, x] > threshold:  # Non-black pixel (above threshold)
             right_bound = x
             break
     
     # Step 2: Refine bounds using diagonal corner detection
     refined_bounds = _refine_bounds_with_diagonal_detection(
-        gray, top_bound, left_bound, bottom_bound, right_bound
+        gray, top_bound, left_bound, bottom_bound, right_bound, threshold
     )
     
     return refined_bounds
 
 
 def _refine_bounds_with_diagonal_detection(gray: np.ndarray, initial_top: int, initial_left: int, 
-                                         initial_bottom: int, initial_right: int) -> Tuple[int, int, int, int]:
+                                         initial_bottom: int, initial_right: int, threshold: int = 15) -> Tuple[int, int, int, int]:
     """
     Refine content bounds using diagonal corner detection.
     
     This method analyzes diagonal paths from each corner toward the center of the image
     to find more accurate content boundaries.
+    
+    Args:
+        threshold: Pixel intensity threshold - pixels below this are considered black/inactive
     """
     h, w = gray.shape
     
@@ -191,19 +195,19 @@ def _refine_bounds_with_diagonal_detection(gray: np.ndarray, initial_top: int, i
     
     # Top-left corner: diagonal down-right toward center
     corner_y, corner_x = corners['top_left']
-    refined_top_left = _find_diagonal_content_bound(gray, corner_y, corner_x, center_y, center_x)
+    refined_top_left = _find_diagonal_content_bound(gray, corner_y, corner_x, center_y, center_x, threshold)
     
     # Top-right corner: diagonal down-left toward center  
     corner_y, corner_x = corners['top_right']
-    refined_top_right = _find_diagonal_content_bound(gray, corner_y, corner_x, center_y, center_x)
+    refined_top_right = _find_diagonal_content_bound(gray, corner_y, corner_x, center_y, center_x, threshold)
     
     # Bottom-left corner: diagonal up-right toward center
     corner_y, corner_x = corners['bottom_left']
-    refined_bottom_left = _find_diagonal_content_bound(gray, corner_y, corner_x, center_y, center_x)
+    refined_bottom_left = _find_diagonal_content_bound(gray, corner_y, corner_x, center_y, center_x, threshold)
     
     # Bottom-right corner: diagonal up-left toward center
     corner_y, corner_x = corners['bottom_right']
-    refined_bottom_right = _find_diagonal_content_bound(gray, corner_y, corner_x, center_y, center_x)
+    refined_bottom_right = _find_diagonal_content_bound(gray, corner_y, corner_x, center_y, center_x, threshold)
     
     # Calculate refined bounds from the diagonal detections
     # Top bound: average of y-coordinates from top corners
@@ -228,9 +232,12 @@ def _refine_bounds_with_diagonal_detection(gray: np.ndarray, initial_top: int, i
 
 
 def _find_diagonal_content_bound(gray: np.ndarray, start_y: int, start_x: int, 
-                               end_y: int, end_x: int) -> Tuple[int, int]:
+                               end_y: int, end_x: int, threshold: int = 15) -> Tuple[int, int]:
     """
     Find the first non-black pixel along a diagonal path from corner toward center.
+    
+    Args:
+        threshold: Pixel intensity threshold - pixels below this are considered black/inactive
     """
     h, w = gray.shape
     
@@ -255,8 +262,8 @@ def _find_diagonal_content_bound(gray: np.ndarray, start_y: int, start_x: int,
         
         # Ensure coordinates are within bounds
         if 0 <= y < h and 0 <= x < w:
-            # Check if pixel is non-black
-            if gray[y, x] > 0:
+            # Check if pixel is non-black (above threshold)
+            if gray[y, x] > threshold:
                 return (y, x)
     
     # If no content found, return the end point (center)
@@ -372,10 +379,17 @@ def get_image_files(folder_path: Path, extensions: Tuple[str, ...] = ('.png', '.
     if not folder_path.exists():
         return []
     
+    # Use case-insensitive glob pattern to avoid duplicates on Windows
     image_files = []
+    seen_files = set()  # Track files we've already added
+    
     for ext in extensions:
-        image_files.extend(folder_path.glob(f"*{ext}"))
-        image_files.extend(folder_path.glob(f"*{ext.upper()}"))
+        # Only search lowercase - Windows file system is case-insensitive anyway
+        for file_path in folder_path.glob(f"*{ext}"):
+            # Use resolved path to ensure uniqueness
+            if file_path not in seen_files:
+                seen_files.add(file_path)
+                image_files.append(file_path)
     
     # Natural sort by filename
     def natural_sort_key(path):

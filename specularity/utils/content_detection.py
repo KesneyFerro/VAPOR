@@ -1,20 +1,26 @@
 """
 Content detection utilities for VAPOR project.
-LEGACY MODULE - Use blur.core.image.processing for new implementations.
+LEGACY MODULE - Use utils.core_utilities for new implementations.
 
 This module is kept for backward compatibility. New code should use
-the improved content detection methods in blur.core.image.processing which
+the improved content detection methods in utils.core_utilities which
 include diagonal corner detection and better accuracy.
 """
 
 import warnings
-from blur.core.image.processing import find_content_bounds as _new_find_content_bounds
-from blur.core.image.processing import crop_to_content as _new_crop_to_content
+import sys
+from pathlib import Path
+
+# Add parent directories to path for imports
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
+from utils.core_utilities import find_content_bounds_diagonal as _new_find_content_bounds
+from utils.core_utilities import crop_to_content as _new_crop_to_content
 
 # Issue deprecation warning
 warnings.warn(
     "specularity.utils.content_detection is deprecated. "
-    "Use blur.core.image.processing instead for improved content detection.",
+    "Use utils.core_utilities instead for improved content detection.",
     DeprecationWarning,
     stacklevel=2
 )

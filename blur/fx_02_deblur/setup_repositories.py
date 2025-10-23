@@ -6,7 +6,6 @@ This script clones and sets up conda environments for various deblurring models:
 - DeblurGAN-v2
 - Restormer  
 - Uformer
-- DeblurDiNAT
 - DPIR
 - MPRNet
 
@@ -62,17 +61,6 @@ REPOS_CONFIG = {
         "requirements": "requirements.txt",
         "setup_commands": [
             "pip install torch torchvision torchaudio", 
-            "pip install -r requirements.txt"
-        ]
-    },
-    "DeblurDiNAT": {
-        "url": "https://github.com/HanzhouLiu/DeblurDiNAT.git",
-        "python_version": "3.8",
-        "conda_env": "deblurdinat", 
-        "folder": "DeblurDiNAT",
-        "requirements": "requirements.txt",
-        "setup_commands": [
-            "pip install torch torchvision torchaudio",
             "pip install -r requirements.txt"
         ]
     },

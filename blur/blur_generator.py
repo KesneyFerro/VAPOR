@@ -514,9 +514,9 @@ class BlurGenerator:
         return success_count
     
     def calculate_metrics(self) -> bool:
-        """Metrics calculation is now handled by the main pipeline through updated_calculator.py"""
+        """Metrics calculation is now handled by the main pipeline through metrics_calculator.py"""
         print("\n[STEP 4] Metrics calculation handled by main pipeline")
-        print("    [INFO] Metrics will be calculated by vapor_enhanced_pipeline.py using updated_calculator.py")
+        print("    [INFO] Metrics will be calculated by vapor_complete_pipeline.py using metrics_calculator.py")
         print("    [INFO] This prevents duplicate metric entries and ensures consistency")
         return True
     

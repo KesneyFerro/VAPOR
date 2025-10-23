@@ -1,6 +1,9 @@
 """
 VAPOR-Maploc Setup and Integration Script
 Ensures maploc dependencies are installed and adapts the pipeline for VAPOR.
+
+Maploc Repository: https://github.com/vu-maple-lab/maploc.git
+Clone with: git clone https://github.com/vu-maple-lab/maploc.git
 """
 
 import subprocess

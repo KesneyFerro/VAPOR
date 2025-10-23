@@ -3,21 +3,47 @@
 
 # Core computer vision and numerical computing
 opencv-python>=4.8.0
-numpy>=1.24.0
+numpy>=1.24.0,<2.0.0
 scipy>=1.7.0
 
 # Data visualization and plotting
 matplotlib>=3.7.0
 
 # Data analysis and CSV handling
-pandas>=1.5.0
+pandas>=1.5.0,<2.0.0
 
-# Image processing
+# YAML configuration support
+PyYAML>=6.0
+
+# Image processing and metrics
 scikit-image>=0.20.0
 Pillow>=8.0.0
 
-# Optional: For enhanced performance and additional features
-# Uncomment if needed:
-# tensorflow>=2.13.0
-# torch>=2.0.0
-# imageio>=2.31.0
+# Image quality metrics
+imageio>=2.31.0
+pyiqa>=0.1.7  # PyTorch Image Quality Assessment - BRISQUE, NIQE, and more
+piq>=0.7.0  # PyTorch Image Quality - PSNR, SSIM, MS-SSIM
+torch>=1.9.0  # Required for piq and pyiqa
+torchvision>=0.10.0  # Required for piq and pyiqa
+
+# For 3D reconstruction (optional - may need conda install)
+# pycolmap  # Install via: conda install -c conda-forge pycolmap
+
+# Deep learning frameworks (optional - for deblur methods)
+# tensorflow>=2.8.0
+
+# Additional utility packages
+tqdm>=4.64.0
+argparse
+pathlib2
+
+# Jupyter support (optional)
+# jupyter>=1.0.0
+# ipython>=7.0.0
+
+# For advanced image processing
+networkx>=2.8
+
+# Optional: Enhanced performance packages
+# numba>=0.56.0
+# cupy-cuda11x  # For CUDA acceleration (if available)

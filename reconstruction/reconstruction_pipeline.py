@@ -1,17 +1,26 @@
 """
 VAPOR 3D Reconstruction Pipeline
-Unified script for running Structure from Motion (SfM) reconstruction on original, blurred, and deblurred frames.
+Unified script for running Structure from Motion (SfM) reconstruction on frames.
 
-This script integrates the maploc SfM pipeline with VAPOR's blur processing system to:
-1. Run 3D reconstruction on original frames
-2. Run 3D reconstruction on all blurred frame variations
-3. Run 3D reconstruction on deblurred frames (when available)
-4. Compare reconstruction quality across different blur conditions
-5. Save results in organized directory structure
+This script integrates the maploc SfM pipeline with VAPOR's system to:
+1. Run 3D reconstruction on any folder containing PNG images
+2. Run 3D reconstruction on original frames
+3. Run 3D reconstruction on all blurred frame variations
+4. Run 3D reconstruction on deblurred frames (when available)
+5. Compare reconstruction quality across different blur conditions
+6. Save results in organized directory structure
 
 Usage:
+    # Process a specific folder of PNG images:
+    python reconstruction_pipeline.py --folder "S:\Kesney\VAPOR\data\frames\original\pat3" [--feature disk] [--matcher disk+lightglue]
+    
+    # Process all frame sets for a video:
     python reconstruction_pipeline.py --video pat3.mp4 [--feature disk] [--matcher disk+lightglue]
 """
+
+import os
+# Fix OpenMP runtime conflict before importing other modules
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 import argparse
 import sys
@@ -29,82 +38,259 @@ sys.path.append(str(Path(__file__).parent / "maploc"))  # Add maploc directory
 
 from reconstruction.maploc.BatchRunUtils import TrialConfig
 from reconstruction.maploc.hloc import extract_features, match_features
+from utils.data_manager import VAPORDataManager
 import pycolmap
+import h5py
 
 
 class VAPORReconstructionPipeline:
     """Unified 3D reconstruction pipeline for VAPOR blur analysis."""
     
-    def __init__(self, video_name: str, feature: str = "disk", matcher: str = "disk+lightglue"):
+    def __init__(self, video_name: str = None, folder_path: str = None, feature: str = "disk", 
+                 matcher: str = "disk+lightglue", skip_cleanup: bool = False, pipeline_mode: bool = False,
+                 run_id: str = None):
         """Initialize the reconstruction pipeline.
         
         Args:
-            video_name: Name of video file (e.g., 'pat3.mp4')
+            video_name: Name of video file (e.g., 'pat3.mp4') - for processing all frame sets
+            folder_path: Direct path to folder containing PNG images - for single folder processing
             feature: Feature detector to use ('disk', 'superpoint', etc.)
             matcher: Feature matcher to use ('disk+lightglue', 'superglue', etc.)
+            skip_cleanup: Skip cleaning previous outputs (useful if permission issues)
+            pipeline_mode: If True, use pipeline data manager; if False, use standalone
+            run_id: Specific run ID to use (optional, will be generated if None)
         """
+        self.folder_mode = folder_path is not None
         self.video_name = video_name
-        self.video_stem = Path(video_name).stem  # Remove .mp4 extension
+        self.folder_path = Path(folder_path) if folder_path else None
+        self.video_stem = Path(video_name).stem if video_name else None
         self.feature = feature
         self.matcher = matcher
+        self.skip_cleanup = skip_cleanup
+        self.pipeline_mode = pipeline_mode
+        self.run_id = run_id
         
         # Setup base paths
         self.base_dir = Path(__file__).parent
-        self.data_dir = self.base_dir / "data"
+        self.data_dir = self.base_dir.parent / "data"
         
-        # Input paths - frame directories
-        self.frames_base = self.data_dir / "frames"
-        self.frames_original = self.frames_base / "original" / self.video_stem
-        self.frames_blurred = self.frames_base / "blurred" / self.video_stem
-        self.frames_deblurred = self.frames_base / "deblurred" / self.video_stem
+        # Initialize data manager
+        if self.pipeline_mode:
+            # Use pipeline data manager for persistent, timestamped outputs
+            self.data_manager = VAPORDataManager(
+                video_name=self.video_name,
+                mode="pipeline",
+                run_id=self.run_id  # Pass run_id to coordinate with other modules
+            )
+            # Use data manager paths
+            self.point_clouds_base = self.data_manager.point_clouds_dir
+            self.metrics_base = self.data_manager.metrics_dir
+            self.timestamp = self.data_manager.timestamp if not self.run_id else self.run_id
+        else:
+            # Use standalone mode for testing (overwritable outputs)
+            self.data_manager = VAPORDataManager(
+                video_name=self.video_name if self.video_name else "test.mp4",
+                mode="standalone",
+                module_name="reconstruction"
+            )
+            # Use data manager paths
+            self.point_clouds_base = self.data_manager.point_clouds_dir
+            self.metrics_base = self.data_manager.metrics_dir
+            self.timestamp = self.data_manager.timestamp
         
-        # Output paths - point clouds and metrics
-        self.point_clouds_base = self.data_dir / "point_clouds" / self.video_stem
-        self.metrics_base = self.data_dir / "metrics" / self.video_stem
+        # Parse folder information if in folder mode
+        if self.folder_mode:
+            path_parts = self.folder_path.parts
+            if 'frames' in path_parts:
+                frames_idx = path_parts.index('frames')
+                if frames_idx < len(path_parts) - 2:
+                    self.frame_type = path_parts[frames_idx + 1]
+                    self.video_name_from_path = path_parts[frames_idx + 2]
+                else:
+                    self.frame_type = "unknown"
+                    self.video_name_from_path = self.folder_path.name
+            else:
+                self.frame_type = "custom"
+                self.video_name_from_path = self.folder_path.name
+            
+            if self.frame_type in ['blurred', 'deblurred'] and len(path_parts) > frames_idx + 3:
+                self.method_name = path_parts[frames_idx + 3]
+            else:
+                self.method_name = None
+        else:
+            # Video mode - process all frame sets
+            self.frames_base = self.data_dir / "frames"
+            self.frames_original = self.frames_base / "original" / self.video_stem
+            self.frames_blurred = self.frames_base / "blurred" / self.video_stem
+            self.frames_deblurred = self.frames_base / "deblurred" / self.video_stem
         
-        # Reconstruction settings
+        # Reconstruction settings (matching the notebook exactly)
         self.reconstruction_settings = {
             "n_matches": 50,
             "retrieval_algo": "netvlad",
             "geometric_verification_options": dict(
-                min_num_inliers=15,  # Reduced for smaller frame sets
-                ransac=dict(max_num_trials=10000, min_inlier_ratio=0.3)
+                min_num_inliers=250,
+                ransac=dict(max_num_trials=20000, min_inlier_ratio=0.9)
             )
         }
         
-        # Initialize directories
-        self._setup_directories()
-        
-        # Configure logging
+        # Setup logging
         self._setup_logging()
         
     def _setup_directories(self):
-        """Create necessary output directories."""
-        # Point cloud directories
-        self.point_clouds_base.mkdir(parents=True, exist_ok=True)
-        (self.point_clouds_base / "original").mkdir(exist_ok=True)
-        (self.point_clouds_base / "blurred").mkdir(exist_ok=True)
-        (self.point_clouds_base / "deblurred").mkdir(exist_ok=True)
-        
-        # Metrics directories
-        self.metrics_base.mkdir(parents=True, exist_ok=True)
-        (self.metrics_base / "original").mkdir(exist_ok=True)
-        (self.metrics_base / "blurred").mkdir(exist_ok=True)
-        (self.metrics_base / "deblurred").mkdir(exist_ok=True)
-        
+        """Create necessary output directories - now handled by data manager."""
+        pass  # Data manager handles directory creation
+    
+    
     def _setup_logging(self):
         """Configure logging for the reconstruction pipeline."""
-        log_file = self.metrics_base / f"reconstruction_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        # Use data manager to get log file path
+        log_file = self.data_manager.get_log_file_path("reconstruction")
         
+        # Clear any existing handlers to avoid duplicates
+        logging.getLogger().handlers.clear()
+        
+        # Create a new logger with both file and console handlers
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(log_file),
+                logging.FileHandler(log_file, mode='w'),  # 'w' mode to overwrite existing logs
                 logging.StreamHandler()
-            ]
+            ],
+            force=True  # Force reconfiguration
         )
         self.logger = logging.getLogger(__name__)
+        
+        # Log the setup
+        self.logger.info(f"Logging initialized - log file: {log_file}")
+        
+    def run_single_folder_reconstruction(self):
+        """Run reconstruction on a single folder of PNG images."""
+        if not self.folder_mode:
+            raise ValueError("This method requires folder_mode to be enabled")
+            
+        self.logger.info("="*80)
+        self.logger.info(f"VAPOR Single Folder Reconstruction - {self.folder_path}")
+        self.logger.info("="*80)
+        
+        # Setup directories if cleanup was skipped
+        if self.skip_cleanup:
+            self.logger.info("Cleanup was skipped during initialization (--skip-cleanup)")
+            self._setup_directories()  # Still ensure directories exist
+        
+        # Verify folder exists and contains PNG files
+        if not self.folder_path.exists():
+            self.logger.error(f"Folder does not exist: {self.folder_path}")
+            return False
+            
+        png_files = list(self.folder_path.glob("*.png"))
+        if not png_files:
+            self.logger.error(f"No PNG files found in: {self.folder_path}")
+            return False
+            
+        self.logger.info(f"Found {len(png_files)} PNG files")
+        self.logger.info(f"Using retrieval algorithm: {self.reconstruction_settings['retrieval_algo']}")
+        self.logger.info(f"Number of matches per image: {self.reconstruction_settings['n_matches']}")
+        
+        # Log what will be generated and where
+        self.logger.info("="*60)
+        self.logger.info("RECONSTRUCTION OUTPUTS:")
+        self.logger.info(f"Video: {self.video_name_from_path}")
+        self.logger.info(f"Frame type: {self.frame_name}")
+        self.logger.info(f"Timestamp: {self.timestamp}")
+        self.logger.info(f"Main output directory: {self.outputs_base}")
+        self.logger.info(f"Point clouds will be saved to: {self.point_clouds_base}")
+        self.logger.info(f"Metrics will be saved to: {self.metrics_base}")
+        self.logger.info("Files that will be generated:")
+        self.logger.info("  - reconstruction.ply (3D point cloud)")
+        self.logger.info("  - reconstruction_stats.json (statistics)")
+        self.logger.info("  - pairs-*.txt (image pairs)")
+        self.logger.info("  - feats-*.h5 (features)")
+        self.logger.info("  - matches-*.h5 (matches)")
+        self.logger.info("  - models/ (COLMAP model files)")
+        self.logger.info("="*60)
+        
+        # Run reconstruction
+        output_name = f"reconstruction_{self.frame_name}"
+        results = self.run_sfm_reconstruction(
+            frames_path=self.folder_path,
+            output_name=output_name,
+            frame_type=self.frame_type  # Use detected frame type
+        )
+        
+        if results:
+            self.logger.info("\n--- Reconstruction Results ---")
+            basic = results.get('basic_metrics', {})
+            self.logger.info(f"Registered Images: {basic.get('num_registered_images', 0)}")
+            self.logger.info(f"3D Points: {basic.get('num_3d_points', 0)}")
+            self.logger.info(f"Mean Reprojection Error: {basic.get('mean_reprojection_error', 0):.4f}")
+            self.logger.info(f"Mean Track Length: {basic.get('mean_track_length', 0):.2f}")
+            
+            # Find and copy largest reconstruction if multiple exist
+            self._process_multiple_reconstructions()
+            
+            self.logger.info("\n--- Output Summary ---")
+            self.logger.info(f"All outputs saved to: {self.outputs_base}")
+            self.logger.info(f"Point cloud (.ply): {self.point_clouds_base}")
+            self.logger.info(f"Statistics (.json): {self.metrics_base}")
+            
+            self.logger.info("="*80)
+            self.logger.info("SINGLE FOLDER RECONSTRUCTION COMPLETED SUCCESSFULLY")
+            self.logger.info("="*80)
+            return True
+        else:
+            self.logger.error("Reconstruction failed!")
+            return False
+            
+    def _process_multiple_reconstructions(self):
+        """Process multiple reconstructions and select the largest one (from notebook logic)."""
+        try:
+            sfm_dirs = list(self.point_clouds_base.glob("sfm_*"))
+            if not sfm_dirs:
+                return
+                
+            for sfm_dir in sfm_dirs:
+                models_dir = sfm_dir / "models"
+                if not models_dir.exists():
+                    continue
+                    
+                model_subdirs = [p for p in models_dir.iterdir() if p.is_dir()]
+                
+                if len(model_subdirs) > 1:
+                    self.logger.info("Multiple reconstructions found, selecting largest...")
+                    
+                    # Find reconstruction with largest points3D.bin file
+                    point_files = []
+                    sizes = []
+                    
+                    for model_dir in model_subdirs:
+                        point_file = model_dir / "points3D.bin"
+                        if point_file.exists():
+                            point_files.append(point_file)
+                            sizes.append(point_file.stat().st_size)
+                    
+                    if sizes:
+                        largest_idx = np.argmax(sizes)
+                        largest_recon = point_files[largest_idx].parent
+                        
+                        self.logger.info(f"Largest reconstruction: {largest_recon.name}")
+                        self.logger.info(f"Point file sizes: {sizes}")
+                        
+                        # Export PLY for each reconstruction
+                        for model_dir in model_subdirs:
+                            try:
+                                import pycolmap
+                                reconstruction = pycolmap.Reconstruction()
+                                reconstruction.read_binary(str(model_dir))
+                                ply_path = model_dir / f"reconstruction_{model_dir.name}.ply"
+                                reconstruction.export_PLY(str(ply_path))
+                                self.logger.info(f"Exported: {ply_path}")
+                            except Exception as e:
+                                self.logger.warning(f"Failed to export {model_dir}: {e}")
+                                
+        except Exception as e:
+            self.logger.warning(f"Error processing multiple reconstructions: {e}")
         
     def get_available_frame_sets(self):
         """Discover available frame sets for reconstruction."""
@@ -162,18 +348,29 @@ class VAPORReconstructionPipeline:
         
         try:
             # Create output directory for this reconstruction
-            if frame_type == "original":
-                output_dir = self.point_clouds_base / "original" / output_name
-            elif frame_type == "blurred":
-                output_dir = self.point_clouds_base / "blurred" / output_name
-            elif frame_type == "deblurred":
-                output_dir = self.point_clouds_base / "deblurred" / output_name
-            else:
+            if self.folder_mode:
+                # In folder mode, output goes directly to the frame-specific directory
                 output_dir = self.point_clouds_base / output_name
+            else:
+                # In video mode, organize by frame type under the timestamp
+                if frame_type == "original":
+                    frame_dir = "original"
+                elif frame_type == "blurred":
+                    # Extract blur method from output_name (e.g., "blurred_motion_blur_high" -> "motion_blur_high")
+                    frame_dir = output_name.replace("blurred_", "") if "blurred_" in output_name else "blurred"
+                elif frame_type == "deblurred":
+                    # Extract deblur method from output_name (e.g., "deblurred_uformer" -> "uformer")
+                    frame_dir = output_name.replace("deblurred_", "") if "deblurred_" in output_name else "deblurred"
+                else:
+                    frame_dir = frame_type
+                
+                output_dir = self.point_clouds_base / frame_dir / output_name
                 
             output_dir.mkdir(parents=True, exist_ok=True)
             
-            # Create TrialConfig for maploc pipeline
+            self.logger.info(f"  Output directory: {output_dir}")
+            
+            # Create TrialConfig for maploc pipeline (using notebook settings)
             trial_config = TrialConfig(
                 feature=self.feature,
                 matcher=self.matcher,
@@ -187,29 +384,115 @@ class VAPORReconstructionPipeline:
             
             # Run the reconstruction pipeline
             self.logger.info(f"  Running feature extraction and matching...")
-            trial_config.pairFromRetrieval(nMatches=self.reconstruction_settings["n_matches"])
-            trial_config.extractAndMatchFeatures()
             
+            # Use fixed n_matches like the notebook (with fallback for errors)
+            try:
+                trial_config.pairFromRetrieval(nMatches=self.reconstruction_settings["n_matches"])
+            except Exception as e:
+                self.logger.warning(f"  Retrieval failed with {self.reconstruction_settings['n_matches']} matches: {e}")
+                # Fall back to exhaustive matching if retrieval fails
+                self.logger.info(f"  Falling back to exhaustive matching...")
+                trial_config.retrievalConfig = "EXHAUSTIVE"
+                trial_config.pairFromRetrieval(nMatches=self.reconstruction_settings["n_matches"])
+            
+            trial_config.extractAndMatchFeatures()
+
             self.logger.info(f"  Running SfM reconstruction...")
-            trial_config.reconstruction()
+            # Simple reconstruction call matching the notebook exactly
+            try:
+                trial_config.reconstruction()
+            except Exception as e:
+                self.logger.error(f"  Reconstruction call failed: {e}")
+                import traceback
+                self.logger.error(f"  Stack trace: {traceback.format_exc()}")
+                return None
             
             # Export results
             if hasattr(trial_config, 'model') and trial_config.model is not None:
+                # Simple success logging like the notebook
+                total_images = len(list(frames_path.glob('*.png')))
+                registered_images = len(trial_config.model.reg_image_ids())
+                num_points = trial_config.model.num_points3D()
+                
+                self.logger.info(f"  Registration: {registered_images}/{total_images} images")
+                self.logger.info(f"  3D points: {num_points}")
+                
+                # Check if reconstruction is valid (has registered images and points)
+                if registered_images == 0:
+                    self.logger.warning(f"  No images were registered - reconstruction failed")
+                    return None
+                
+                if num_points == 0:
+                    self.logger.warning(f"  No 3D points reconstructed - reconstruction failed")
+                    return None
+                
+                # Export PLY with error handling
                 ply_path = output_dir / "reconstruction.ply"
-                trial_config.model.export_PLY(str(ply_path))
-                self.logger.info(f"  Exported point cloud: {ply_path}")
+                try:
+                    trial_config.model.export_PLY(str(ply_path))
+                    self.logger.info(f"  Exported point cloud: {ply_path}")
+                except Exception as e:
+                    self.logger.error(f"  Failed to export PLY: {e}")
+                    # Continue anyway - we can still save metrics even if PLY export fails
+                    ply_path = None
                 
-                # Calculate reconstruction statistics
-                stats = self._calculate_reconstruction_stats(trial_config.model, output_name, frame_type)
+                # Also copy to main data directory for pipeline compatibility
+                if ply_path and ply_path.exists() and hasattr(self, 'data_point_clouds_base'):
+                    try:
+                        data_ply_dir = self.data_point_clouds_base / output_name
+                        data_ply_dir.mkdir(parents=True, exist_ok=True)
+                        data_ply_path = data_ply_dir / "reconstruction.ply"
+                        
+                        import shutil
+                        shutil.copy2(ply_path, data_ply_path)
+                        self.logger.info(f"  Also saved to data directory: {data_ply_path}")
+                    except Exception as e:
+                        self.logger.error(f"  Failed to copy PLY to data directory: {e}")
                 
-                # Save statistics
-                stats_path = output_dir / "reconstruction_stats.json"
-                with open(stats_path, 'w') as f:
-                    json.dump(stats, f, indent=2)
+                # Calculate reconstruction statistics with enhanced metrics
+                stats = self._calculate_reconstruction_stats(
+                    model=trial_config.model,
+                    output_name=output_name,
+                    frame_type=frame_type,
+                    features_path=trial_config.featurePath,
+                    matches_path=trial_config.matchPath
+                )
+                
+                # Check if stats calculation had an error
+                if 'error' in stats.get('basic_metrics', {}):
+                    self.logger.error(f"  Reconstruction stats calculation failed, skipping metrics save")
+                    return stats
+                
+                # Save using data manager
+                if self.pipeline_mode:
+                    # Extract method name from output_name or frame_type
+                    if frame_type == "blurred" or frame_type == "deblurred":
+                        # output_name format: "blurred_motion_blur_high" or "deblurred_Restormer"
+                        method_name = output_name.replace(f"{frame_type}_", "")
+                    else:
+                        method_name = None
+                    
+                    self.data_manager.save_reconstruction_metrics(
+                        frame_type=frame_type,
+                        method_name=method_name,
+                        reconstruction_settings=self.reconstruction_settings,
+                        basic_metrics=stats['basic_metrics'],
+                        per_image_metrics=stats.get('per_image_metrics'),
+                        matching_metrics=stats.get('matching_metrics'),
+                        point_cloud_metrics=stats.get('point_cloud_metrics'),
+                        processing_info=stats.get('processing_info'),
+                        file_references=stats.get('file_references')
+                    )
+                else:
+                    # Standalone mode - save to test_run folder
+                    stats_path = output_dir / "reconstruction_metrics.json"
+                    with open(stats_path, 'w') as f:
+                        json.dump(stats, f, indent=2)
                     
                 self.logger.info(f"  Reconstruction completed successfully")
                 return stats
             else:
+                # Simple failure logging
                 self.logger.warning(f"  Reconstruction failed - no model generated")
                 return None
                 
@@ -217,37 +500,262 @@ class VAPORReconstructionPipeline:
             self.logger.error(f"  Reconstruction failed with error: {e}")
             return None
     
-    def _calculate_reconstruction_stats(self, model, output_name: str, frame_type: str):
-        """Calculate reconstruction quality statistics."""
+    def _calculate_reconstruction_stats(self, model, output_name: str, frame_type: str,
+                                         features_path: Path = None, matches_path: Path = None):
+        """Calculate comprehensive reconstruction quality statistics."""
         try:
-            stats = {
-                'reconstruction_name': output_name,
-                'frame_type': frame_type,
-                'timestamp': datetime.now().isoformat(),
-                'feature_detector': self.feature,
-                'feature_matcher': self.matcher,
-                'num_registered_images': len(model.reg_image_ids()),
+            # Get set of registered image IDs for efficient lookup
+            registered_ids = set(model.reg_image_ids())
+            
+            # Basic metrics (always collected - no performance impact)
+            basic_metrics = {
+                'num_input_images': len(list(model.images.values())),
+                'num_registered_images': len(registered_ids),
+                'registration_rate': len(registered_ids) / len(model.images) if len(model.images) > 0 else 0,
                 'num_3d_points': model.num_points3D(),
+                'num_observations': sum(len(img.points2D) for img_id, img in model.images.items() if img_id in registered_ids),
+                'mean_track_length': model.compute_mean_track_length(),
                 'mean_observations_per_image': model.compute_mean_observations_per_reg_image(),
                 'mean_reprojection_error': model.compute_mean_reprojection_error(),
-                'mean_track_length': model.compute_mean_track_length(),
             }
             
-            # Add summary string
-            stats['summary'] = model.summary()
+            # Collect enhanced metrics if in pipeline mode
+            per_image_metrics = None
+            matching_metrics = None
+            point_cloud_metrics = None
+            
+            if self.pipeline_mode:
+                # LOW IMPACT: Per-image metrics (~5% overhead)
+                per_image_metrics = self._collect_per_image_metrics(model, features_path)
+                
+                # MODERATE IMPACT: Matching metrics (~10% overhead)
+                if matches_path and matches_path.exists():
+                    matching_metrics = self._collect_matching_metrics(matches_path)
+                
+                # MODERATE IMPACT: Point cloud metrics (~10% overhead)
+                point_cloud_metrics = self._collect_point_cloud_metrics(model)
+            
+            # Compile all stats
+            stats = {
+                'basic_metrics': basic_metrics,
+                'per_image_metrics': per_image_metrics,
+                'matching_metrics': matching_metrics,
+                'point_cloud_metrics': point_cloud_metrics,
+                'processing_info': {
+                    'timestamp': datetime.now().isoformat(),
+                    'reconstruction_name': output_name,
+                    'frame_type': frame_type,
+                    'feature_detector': self.feature,
+                    'feature_matcher': self.matcher,
+                    'model_summary': model.summary() if model else None
+                },
+                'file_references': {
+                    'features': str(features_path.name) if features_path else None,
+                    'matches': str(matches_path.name) if matches_path else None,
+                }
+            }
             
             return stats
             
         except Exception as e:
             self.logger.error(f"Failed to calculate reconstruction stats: {e}")
+            import traceback
+            self.logger.error(f"Stack trace: {traceback.format_exc()}")
+            
+            # Return minimal valid stats structure
             return {
-                'reconstruction_name': output_name,
-                'frame_type': frame_type,
-                'error': str(e)
+                'basic_metrics': {
+                    'error': str(e),
+                    'num_input_images': 0,
+                    'num_registered_images': 0,
+                    'registration_rate': 0.0,
+                    'num_3d_points': 0,
+                    'num_observations': 0,
+                    'mean_track_length': 0.0,
+                    'mean_observations_per_image': 0.0,
+                    'mean_reprojection_error': 0.0,
+                },
+                'per_image_metrics': None,
+                'matching_metrics': None,
+                'point_cloud_metrics': None,
+                'processing_info': {
+                    'timestamp': datetime.now().isoformat(),
+                    'reconstruction_name': output_name,
+                    'frame_type': frame_type,
+                    'error': str(e)
+                },
+                'file_references': None
             }
     
+    def _collect_per_image_metrics(self, model, features_path: Path = None) -> dict:
+        """Collect per-image quality metrics (LOW computational cost)."""
+        try:
+            feature_counts = []
+            per_image_errors = []
+            per_image_points = []
+            
+            # Load features if available
+            features = {}
+            if features_path and features_path.exists():
+                try:
+                    with h5py.File(features_path, 'r') as f:
+                        for key in f.keys():
+                            if 'keypoints' in f[key]:
+                                features[key] = len(f[key]['keypoints'][()])
+                except Exception as e:
+                    self.logger.warning(f"Could not load features from {features_path}: {e}")
+            
+            # Collect per-image statistics
+            for img_id in model.reg_image_ids():
+                image = model.images[img_id]
+                
+                # Feature counts
+                if image.name in features:
+                    feature_counts.append(features[image.name])
+                
+                # Points visible in this image
+                num_points = sum(1 for p2D in image.points2D if p2D.point3D_id != -1)
+                per_image_points.append(num_points)
+                
+                # Calculate mean error for this image's observations
+                errors = []
+                for point2D in image.points2D:
+                    if point2D.point3D_id != -1 and point2D.point3D_id in model.points3D:
+                        point3D = model.points3D[point2D.point3D_id]
+                        errors.append(point3D.error)
+                
+                if errors:
+                    per_image_errors.append(np.mean(errors))
+                else:
+                    per_image_errors.append(0.0)
+            
+            return {
+                'feature_detection': {
+                    'mean_features_per_image': np.mean(feature_counts) if feature_counts else 0,
+                    'std_features_per_image': np.std(feature_counts) if feature_counts else 0,
+                    'min_features': np.min(feature_counts) if feature_counts else 0,
+                    'max_features': np.max(feature_counts) if feature_counts else 0,
+                },
+                'registration_quality': {
+                    'mean_error': np.mean(per_image_errors) if per_image_errors else 0,
+                    'std_error': np.std(per_image_errors) if per_image_errors else 0,
+                    'mean_registered_points': np.mean(per_image_points) if per_image_points else 0,
+                    'std_registered_points': np.std(per_image_points) if per_image_points else 0,
+                }
+            }
+        except Exception as e:
+            self.logger.warning(f"Could not collect per-image metrics: {e}")
+            return {}
+    
+    def _collect_matching_metrics(self, matches_path: Path) -> dict:
+        """Collect feature matching quality metrics (MODERATE cost)."""
+        try:
+            total_pairs = 0
+            successful_pairs = 0
+            match_counts = []
+            
+            with h5py.File(matches_path, 'r') as f:
+                for pair_key in f.keys():
+                    total_pairs += 1
+                    
+                    if 'matches0' in f[pair_key]:
+                        matches = f[pair_key]['matches0'][()]
+                        num_matches = np.sum(matches >= 0)
+                        
+                        if num_matches > 0:
+                            successful_pairs += 1
+                            match_counts.append(num_matches)
+            
+            return {
+                'total_pairs_attempted': total_pairs,
+                'successful_pairs': successful_pairs,
+                'pair_success_rate': successful_pairs / total_pairs if total_pairs > 0 else 0,
+                'match_statistics': {
+                    'mean_matches_per_pair': np.mean(match_counts) if match_counts else 0,
+                    'std_matches_per_pair': np.std(match_counts) if match_counts else 0,
+                    'min_matches': np.min(match_counts) if match_counts else 0,
+                    'max_matches': np.max(match_counts) if match_counts else 0,
+                }
+            }
+        except Exception as e:
+            self.logger.warning(f"Could not collect matching metrics: {e}")
+            return {}
+    
+    def _collect_point_cloud_metrics(self, model) -> dict:
+        """Collect point cloud quality metrics (MODERATE cost)."""
+        try:
+            depths = []
+            triangulation_angles = []
+            point_errors = []
+            
+            for point3D in model.points3D.values():
+                # Depth calculation
+                depth = np.linalg.norm(point3D.xyz)
+                depths.append(depth)
+                
+                # Reprojection error
+                point_errors.append(point3D.error)
+                
+                # Triangulation angle (for points with 2+ observations)
+                if len(point3D.track.elements) >= 2:
+                    cameras = []
+                    for track_element in list(point3D.track.elements)[:2]:
+                        if track_element.image_id in model.images:
+                            image = model.images[track_element.image_id]
+                            cam_center = image.projection_center()
+                            cameras.append(cam_center)
+                    
+                    if len(cameras) == 2:
+                        v1 = cameras[0] - point3D.xyz
+                        v2 = cameras[1] - point3D.xyz
+                        norm1 = np.linalg.norm(v1)
+                        norm2 = np.linalg.norm(v2)
+                        if norm1 > 0 and norm2 > 0:
+                            cos_angle = np.dot(v1, v2) / (norm1 * norm2)
+                            cos_angle = np.clip(cos_angle, -1, 1)
+                            angle_deg = np.degrees(np.arccos(cos_angle))
+                            triangulation_angles.append(angle_deg)
+            
+            # Quality classification
+            high_quality = sum(1 for e in point_errors if e < 1.0)
+            medium_quality = sum(1 for e in point_errors if 1.0 <= e < 2.0)
+            low_quality = sum(1 for e in point_errors if e >= 2.0)
+            
+            return {
+                'depth_statistics': {
+                    'mean_depth': float(np.mean(depths)) if depths else 0,
+                    'std_depth': float(np.std(depths)) if depths else 0,
+                    'min_depth': float(np.min(depths)) if depths else 0,
+                    'max_depth': float(np.max(depths)) if depths else 0,
+                    'median_depth': float(np.median(depths)) if depths else 0,
+                },
+                'triangulation_quality': {
+                    'mean_triangulation_angle_degrees': float(np.mean(triangulation_angles)) if triangulation_angles else 0,
+                    'min_triangulation_angle': float(np.min(triangulation_angles)) if triangulation_angles else 0,
+                    'max_triangulation_angle': float(np.max(triangulation_angles)) if triangulation_angles else 0,
+                    'median_triangulation_angle': float(np.median(triangulation_angles)) if triangulation_angles else 0,
+                    'optimal_angle_percentage': float(sum(1 for a in triangulation_angles if 5 < a < 30) / len(triangulation_angles)) if triangulation_angles else 0,
+                },
+                'point_quality_distribution': {
+                    'high_quality_points': high_quality,
+                    'medium_quality_points': medium_quality,
+                    'low_quality_points': low_quality,
+                    'high_quality_percentage': high_quality / len(point_errors) if point_errors else 0,
+                }
+            }
+        except Exception as e:
+            self.logger.warning(f"Could not collect point cloud metrics: {e}")
+            return {}
+    
     def run_complete_pipeline(self):
-        """Run the complete reconstruction pipeline on all available frame sets."""
+        """Run the complete reconstruction pipeline."""
+        if self.folder_mode:
+            return self.run_single_folder_reconstruction()
+        else:
+            return self.run_video_pipeline()
+            
+    def run_video_pipeline(self):
+        """Run the complete reconstruction pipeline on all available frame sets for a video."""
         self.logger.info("="*80)
         self.logger.info(f"VAPOR 3D Reconstruction Pipeline - {self.video_name}")
         self.logger.info("="*80)
@@ -299,22 +807,25 @@ class VAPORReconstructionPipeline:
         # Create comparison DataFrame
         summary_data = []
         for name, stats in all_results.items():
-            if 'error' not in stats:
+            basic = stats.get('basic_metrics', {})
+            processing = stats.get('processing_info', {})
+            
+            if 'error' not in basic:
                 summary_data.append({
                     'reconstruction': name,
-                    'frame_type': stats['frame_type'],
-                    'registered_images': stats['num_registered_images'],
-                    'num_3d_points': stats['num_3d_points'],
-                    'mean_reprojection_error': stats['mean_reprojection_error'],
-                    'mean_track_length': stats['mean_track_length'],
-                    'mean_observations_per_image': stats['mean_observations_per_image']
+                    'frame_type': processing.get('frame_type', 'unknown'),
+                    'registered_images': basic.get('num_registered_images', 0),
+                    'num_3d_points': basic.get('num_3d_points', 0),
+                    'mean_reprojection_error': basic.get('mean_reprojection_error', 0),
+                    'mean_track_length': basic.get('mean_track_length', 0),
+                    'mean_observations_per_image': basic.get('mean_observations_per_image', 0)
                 })
         
         if summary_data:
             df = pd.DataFrame(summary_data)
             
-            # Save summary CSV
-            summary_path = self.metrics_base / f"{self.video_stem}_reconstruction_summary.csv"
+            # Save summary CSV with timestamp
+            summary_path = self.metrics_base / f"{self.video_stem}_reconstruction_summary_{self.timestamp}.csv"
             df.to_csv(summary_path, index=False)
             
             # Print summary table
@@ -333,13 +844,28 @@ class VAPORReconstructionPipeline:
 def main():
     """Main function for running the reconstruction pipeline."""
     parser = argparse.ArgumentParser(
-        description="VAPOR 3D Reconstruction Pipeline"
+        description="VAPOR 3D Reconstruction Pipeline",
+        epilog="""
+Examples:
+  # Process a specific folder of PNG images:
+  python reconstruction_pipeline.py --folder "S:\\Kesney\\VAPOR\\data\\frames\\original\\pat3"
+  
+  # Process all frame sets for a video:
+  python reconstruction_pipeline.py --video pat3.mp4
+        """
     )
-    parser.add_argument(
+    
+    # Create mutually exclusive group for folder or video mode
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument(
+        "--folder",
+        help="Path to folder containing PNG images for reconstruction"
+    )
+    mode_group.add_argument(
         "--video",
-        required=True,
-        help="Video filename (e.g., pat3.mp4)"
+        help="Video filename (e.g., pat3.mp4) - processes all frame sets"
     )
+    
     parser.add_argument(
         "--feature",
         default="disk",
@@ -352,15 +878,43 @@ def main():
         choices=["disk+lightglue", "superglue", "aliked+lightglue", "nn-ratio"],
         help="Feature matcher to use (default: disk+lightglue)"
     )
+    parser.add_argument(
+        "--skip-cleanup",
+        action="store_true",
+        help="Skip cleaning previous reconstruction outputs (useful for permission issues)"
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Unique run identifier (timestamp). If not provided, uses 'test_run' for standalone mode."
+    )
+    parser.add_argument(
+        "--pipeline-mode",
+        action="store_true",
+        help="Enable pipeline mode for timestamped persistent storage (vs test_run that can be overwritten)"
+    )
     
     args = parser.parse_args()
     
-    # Initialize and run pipeline
-    pipeline = VAPORReconstructionPipeline(
-        video_name=args.video,
-        feature=args.feature,
-        matcher=args.matcher
-    )
+    # Initialize pipeline based on mode
+    if args.folder:
+        pipeline = VAPORReconstructionPipeline(
+            folder_path=args.folder,
+            feature=args.feature,
+            matcher=args.matcher,
+            skip_cleanup=args.skip_cleanup,
+            run_id=args.run_id,
+            pipeline_mode=args.pipeline_mode
+        )
+    else:
+        pipeline = VAPORReconstructionPipeline(
+            video_name=args.video,
+            feature=args.feature,
+            matcher=args.matcher,
+            skip_cleanup=args.skip_cleanup,
+            run_id=args.run_id,
+            pipeline_mode=args.pipeline_mode
+        )
     
     success = pipeline.run_complete_pipeline()
     return 0 if success else 1

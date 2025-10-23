@@ -1,6 +1,7 @@
 """
-VAPOR - Unified Video Blur Processing Pipeline
-Processes videos through frame extraction, blur effects, and video reconstruction.
+VAPOR - Blur Processing Example Usage
+Example script showing how to process videos with blur effects.
+NOTE: For production use, see blur_generator.py instead.
 
 Features:
 - Interactive video selection from data/videos/original/
@@ -11,12 +12,12 @@ Features:
 - Configurable stride for frame processing
 
 Usage:
-    python blur/main.py [--stride N]
+    python blur/blur_example_usage.py [--stride N]
     
 Examples:
-    python blur/main.py                 # Process all frames
-    python blur/main.py --stride 5      # Process every 5th frame
-    python blur/main.py --stride 10     # Process every 10th frame
+    python blur/blur_example_usage.py                 # Process all frames
+    python blur/blur_example_usage.py --stride 5      # Process every 5th frame
+    python blur/blur_example_usage.py --stride 10     # Process every 10th frame
 """
 
 import cv2

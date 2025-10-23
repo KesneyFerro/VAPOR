@@ -18,13 +18,16 @@ from specularity.utils.content_detection import find_content_bounds, crop_to_con
 class FrameExtractor:
     """Class for extracting frames from video files."""
     
-    def __init__(self, video_path, output_dir=None):
+    def __init__(self, video_path, output_dir=None, start_time=None, end_time=None, duration=None):
         """
         Initialize frame extractor.
         
         Args:
             video_path: Path to the video file
             output_dir: Output directory for extracted frames (optional)
+            start_time: Start time in seconds for cropping (optional)
+            end_time: End time in seconds for cropping (optional)
+            duration: Duration in seconds from start_time (alternative to end_time)
         """
         self.video_path = video_path
         self.video_name = Path(video_path).stem
@@ -47,9 +50,27 @@ class FrameExtractor:
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         
+        # Calculate time cropping parameters
+        self.start_time = start_time if start_time is not None else 0.0
+        if duration is not None:
+            self.end_time = self.start_time + duration
+        elif end_time is not None:
+            self.end_time = end_time
+        else:
+            self.end_time = self.total_frames / self.fps  # End of video
+        
+        # Calculate frame range for cropping
+        self.start_frame = max(0, int(self.start_time * self.fps))
+        self.end_frame = min(self.total_frames - 1, int(self.end_time * self.fps))
+        self.cropped_total_frames = self.end_frame - self.start_frame + 1
+        
         print(f"Video: {self.video_name}")
         print(f"Total frames: {self.total_frames}")
         print(f"FPS: {self.fps}")
+        if start_time is not None or end_time is not None or duration is not None:
+            print(f"Time crop: {self.start_time:.2f}s to {self.end_time:.2f}s")
+            print(f"Frame range: {self.start_frame} to {self.end_frame}")
+            print(f"Cropped total frames: {self.cropped_total_frames}")
         print(f"Output directory: {self.output_dir}")
     
     def extract_frame(self, frame_number):
@@ -57,12 +78,19 @@ class FrameExtractor:
         Extract a specific frame and apply content detection.
         
         Args:
-            frame_number: Frame number to extract
+            frame_number: Frame number to extract (relative to cropped range)
             
         Returns:
             tuple: (original_frame, cropped_frame) or (None, None) if failed
         """
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        # Convert relative frame number to absolute frame number
+        absolute_frame_number = self.start_frame + frame_number
+        
+        # Check if the frame is within the cropped range
+        if absolute_frame_number > self.end_frame:
+            return None, None
+        
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, absolute_frame_number)
         ret, frame = self.cap.read()
         
         if not ret:
@@ -73,23 +101,23 @@ class FrameExtractor:
             cropped_frame = crop_to_content(frame)
             return frame, cropped_frame
         except Exception as e:
-            print(f"Warning: Content detection failed for frame {frame_number}: {e}")
+            print(f"Warning: Content detection failed for frame {absolute_frame_number}: {e}")
             return frame, frame
     
     def extract_all_frames(self, crop_content=True, save_original=False):
         """
-        Extract all frames from the video.
+        Extract all frames from the video (within the time crop range).
         
         Args:
             crop_content: Whether to apply content detection and cropping
             save_original: Whether to save original frames alongside cropped ones
         """
-        print(f"\nExtracting {self.total_frames} frames...")
+        print(f"\nExtracting {self.cropped_total_frames} frames from cropped range...")
         
         extracted_count = 0
         failed_count = 0
         
-        for frame_num in range(self.total_frames):
+        for frame_num in range(self.cropped_total_frames):
             try:
                 original_frame, processed_frame = self.extract_frame(frame_num)
                 
@@ -97,8 +125,9 @@ class FrameExtractor:
                     failed_count += 1
                     continue
                 
-                # Generate filename
-                frame_filename = f"{self.video_name}_extracted_{frame_num:06d}.png"
+                # Generate filename (use absolute frame number for consistency)
+                absolute_frame_num = self.start_frame + frame_num
+                frame_filename = f"{self.video_name}_extracted_{absolute_frame_num:06d}.png"
                 frame_path = self.output_dir / frame_filename
                 
                 # Save the processed frame (cropped or original)
@@ -111,21 +140,22 @@ class FrameExtractor:
                     extracted_count += 1
                 else:
                     failed_count += 1
-                    print(f"Failed to save frame {frame_num}")
+                    print(f"Failed to save frame {absolute_frame_num}")
                 
                 # Optionally save original frame
                 if save_original and crop_content:
-                    original_filename = f"{self.video_name}_original_{frame_num:06d}.png"
+                    original_filename = f"{self.video_name}_original_{absolute_frame_num:06d}.png"
                     original_path = self.output_dir / original_filename
                     cv2.imwrite(str(original_path), original_frame)
                 
                 # Progress update
-                if (frame_num + 1) % 100 == 0 or frame_num == self.total_frames - 1:
-                    progress = (frame_num + 1) / self.total_frames * 100
-                    print(f"Progress: {progress:.1f}% ({frame_num + 1}/{self.total_frames})")
+                if (frame_num + 1) % 100 == 0 or frame_num == self.cropped_total_frames - 1:
+                    progress = (frame_num + 1) / self.cropped_total_frames * 100
+                    print(f"Progress: {progress:.1f}% ({frame_num + 1}/{self.cropped_total_frames})")
                     
             except Exception as e:
-                print(f"Error processing frame {frame_num}: {e}")
+                absolute_frame_num = self.start_frame + frame_num
+                print(f"Error processing frame {absolute_frame_num}: {e}")
                 failed_count += 1
         
         print(f"\nExtraction complete!")
@@ -135,25 +165,25 @@ class FrameExtractor:
     
     def extract_sample_frames(self, num_samples=10, crop_content=True):
         """
-        Extract a sample of frames evenly distributed throughout the video.
+        Extract a sample of frames evenly distributed throughout the video (within cropped range).
         
         Args:
             num_samples: Number of sample frames to extract
             crop_content: Whether to apply content detection and cropping
         """
-        if num_samples >= self.total_frames:
-            print("Number of samples exceeds total frames. Extracting all frames.")
+        if num_samples >= self.cropped_total_frames:
+            print("Number of samples exceeds total cropped frames. Extracting all frames.")
             return self.extract_all_frames(crop_content)
         
-        # Calculate frame indices for sampling
+        # Calculate frame indices for sampling within the cropped range
         frame_indices = []
-        step = self.total_frames / num_samples
+        step = self.cropped_total_frames / num_samples
         for i in range(num_samples):
             frame_idx = int(i * step)
             frame_indices.append(frame_idx)
         
-        print(f"\nExtracting {num_samples} sample frames from {self.total_frames} total frames...")
-        print(f"Frame indices: {frame_indices}")
+        print(f"\nExtracting {num_samples} sample frames from {self.cropped_total_frames} total cropped frames...")
+        print(f"Frame indices (relative): {frame_indices}")
         
         extracted_count = 0
         failed_count = 0
@@ -166,8 +196,9 @@ class FrameExtractor:
                     failed_count += 1
                     continue
                 
-                # Generate filename with sample index
-                frame_filename = f"{self.video_name}_sample_{i:03d}_frame_{frame_num:06d}.png"
+                # Generate filename with sample index (use absolute frame number)
+                absolute_frame_num = self.start_frame + frame_num
+                frame_filename = f"{self.video_name}_sample_{i:03d}_frame_{absolute_frame_num:06d}.png"
                 frame_path = self.output_dir / frame_filename
                 
                 # Save the processed frame
@@ -178,13 +209,14 @@ class FrameExtractor:
                 
                 if success:
                     extracted_count += 1
-                    print(f"Extracted sample {i+1}/{num_samples}: frame {frame_num}")
+                    print(f"Extracted sample {i+1}/{num_samples}: frame {absolute_frame_num}")
                 else:
                     failed_count += 1
-                    print(f"Failed to save frame {frame_num}")
+                    print(f"Failed to save frame {absolute_frame_num}")
                     
             except Exception as e:
-                print(f"Error processing frame {frame_num}: {e}")
+                absolute_frame_num = self.start_frame + frame_num
+                print(f"Error processing frame {absolute_frame_num}: {e}")
                 failed_count += 1
         
         print(f"\nSample extraction complete!")

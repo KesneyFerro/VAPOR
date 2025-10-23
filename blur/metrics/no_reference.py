@@ -5,22 +5,33 @@ These metrics do not require a ground truth image. They evaluate the image
 based on natural statistics, learned models, or image characteristics.
 
 Supported Metrics:
-- BRISQUE (Blind/Referenceless Image Spatial Quality Evaluator)
-- NIQE (Natural Image Quality Evaluator)
+- BRISQUE (Blind/Referenceless Image Spatial Quality Evaluator) - Uses pyiqa library with trained model
+- NIQE (Natural Image Quality Evaluator) - Uses pyiqa library with trained model
 
 Author: Kesney de Oliveira
 Date: September 2025
+Updated: October 2025 - Proper BRISQUE and NIQE using pyiqa with trained models
 """
 
 import cv2
 import numpy as np
 import logging
-from typing import Dict, Union
+from typing import Dict, Union, Optional
 from pathlib import Path
 import warnings
 
-# Suppress warnings for cleaner output
+# Suppress specific numpy warnings for cleaner output
 warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='.*divide.*')
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='.*invalid value.*')
+
+# Try to import pyiqa for BRISQUE and NIQE
+try:
+    import torch
+    import pyiqa
+    PYIQA_AVAILABLE = True
+except ImportError:
+    PYIQA_AVAILABLE = False
 
 
 class NoReferenceMetrics:
@@ -28,13 +39,68 @@ class NoReferenceMetrics:
     No-reference (blind) image quality metrics calculator.
     
     These metrics evaluate image quality without requiring a reference image.
+    Uses proper trained models from pyiqa for BRISQUE and NIQE.
     """
     
     def __init__(self):
         """Initialize the no-reference metrics calculator."""
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize pyiqa metrics if available
+        self.brisque_metric = None
+        self.niqe_metric = None
+        
+        if PYIQA_AVAILABLE:
+            try:
+                # Create metric instances (models will be downloaded on first use)
+                self.brisque_metric = pyiqa.create_metric('brisque')
+                self.niqe_metric = pyiqa.create_metric('niqe')
+            except Exception as e:
+                self.logger.error(f"Failed to initialize pyiqa metrics: {e}")
+        else:
+            self.logger.warning("pyiqa library not available. Install: pip install pyiqa torch torchvision")
     
-    def calculate_all(self, image: np.ndarray) -> Dict[str, float]:
+    def _prepare_tensor(self, image: np.ndarray) -> Optional[torch.Tensor]:
+        """
+        Prepare image as PyTorch tensor for piq metrics.
+        
+        Args:
+            image: Input numpy array (HxW or HxWxC)
+            
+        Returns:
+            Tensor of shape (1, C, H, W) normalized to [0, 1], or None on error
+        """
+        try:
+            # Convert to RGB if grayscale
+            if len(image.shape) == 2:
+                img = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+            elif image.shape[2] == 1:
+                img = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+            else:
+                img = image.copy()
+            
+            # Convert BGR to RGB if needed (OpenCV loads as BGR)
+            if img.shape[2] == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            # Normalize to [0, 1]
+            if img.dtype == np.uint8:
+                img = img.astype(np.float32) / 255.0
+            elif img.max() > 1.0:
+                img = img.astype(np.float32) / 255.0
+            else:
+                img = img.astype(np.float32)
+            
+            # Convert to tensor: (H, W, C) -> (C, H, W) -> (1, C, H, W)
+            tensor = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
+            
+            return tensor
+            
+        except Exception as e:
+            self.logger.error(f"Failed to prepare tensor: {e}")
+            return None
+    
+    def calculate_all(self, image: np.ndarray) -> Dict[str, Optional[float]]:
         """
         Calculate all no-reference metrics.
         
@@ -42,7 +108,7 @@ class NoReferenceMetrics:
             image: Input image to evaluate
             
         Returns:
-            Dictionary containing all calculated metrics
+            Dictionary containing all calculated metrics (None if metric unavailable)
         """
         metrics = {}
         
@@ -50,12 +116,14 @@ class NoReferenceMetrics:
             # Prepare image
             img = self._prepare_image(image)
             
-            # Calculate metrics
+            # Calculate metrics - returns None if unavailable
             metrics['brisque'] = self.calculate_brisque(img)
             metrics['niqe'] = self.calculate_niqe(img)
             
         except Exception as e:
             self.logger.error(f"Error calculating no-reference metrics: {e}")
+            metrics['brisque'] = None
+            metrics['niqe'] = None
             
         return metrics
     
@@ -84,156 +152,82 @@ class NoReferenceMetrics:
                 
         return gray
     
-    def calculate_brisque(self, image: np.ndarray) -> float:
+    def calculate_brisque(self, image: np.ndarray) -> Optional[float]:
         """
         Calculate BRISQUE (Blind/Referenceless Image Spatial Quality Evaluator).
         
-        BRISQUE predicts quality by analyzing natural scene statistics and distortions.
-        This is a simplified implementation. For full accuracy, use pre-trained models.
+        Uses pyiqa library's trained BRISQUE model with proper SVR prediction.
+        BRISQUE scores range from 0-100, where lower is better quality.
+        
+        Typical ranges:
+        - Excellent: 0-20
+        - Good: 20-40
+        - Fair: 40-60
+        - Poor: 60-100
         
         Args:
-            image: Input image (grayscale, uint8)
+            image: Input image (color or grayscale)
             
         Returns:
-            BRISQUE score (lower values indicate better quality)
+            BRISQUE score (0-100, lower is better quality) or None if unavailable
         """
+        if self.brisque_metric is None:
+            return None
+        
         try:
-            img = self._prepare_image(image)
+            # Prepare image as tensor
+            tensor = self._prepare_tensor(image)
+            if tensor is None:
+                return None
             
-            # Calculate local mean and standard deviation using Gaussian filtering
-            mu = cv2.GaussianBlur(img.astype(np.float64), (7, 7), 1.166)
-            mu_sq = mu * mu
-            sigma = cv2.GaussianBlur((img.astype(np.float64) * img.astype(np.float64)), (7, 7), 1.166)
-            sigma = np.sqrt(np.abs(sigma - mu_sq))
+            # Calculate BRISQUE using pyiqa (returns tensor)
+            with torch.no_grad():
+                score = self.brisque_metric(tensor)
             
-            # Normalize (MSCN coefficients)
-            structdis = (img.astype(np.float64) - mu) / (sigma + 1)
-            
-            # Calculate features only where sigma > 0
-            valid_mask = sigma > 0
-            if not np.any(valid_mask):
-                return 100.0  # Return poor quality score if no valid pixels
-            
-            structdis_valid = structdis[valid_mask]
-            
-            # Calculate statistical features
-            mean_mscn = np.mean(structdis_valid)
-            std_mscn = np.std(structdis_valid)
-            
-            # Calculate skewness and kurtosis
-            if std_mscn > 0:
-                skewness = np.mean(((structdis_valid - mean_mscn) / std_mscn) ** 3)
-                kurtosis = np.mean(((structdis_valid - mean_mscn) / std_mscn) ** 4) - 3
-            else:
-                skewness = 0
-                kurtosis = 0
-            
-            # Calculate pairwise product features (simplified)
-            # Horizontal pairs
-            h_pairs = structdis_valid[:-1] * structdis_valid[1:]
-            mean_h = np.mean(h_pairs) if len(h_pairs) > 0 else 0
-            std_h = np.std(h_pairs) if len(h_pairs) > 0 else 0
-            
-            # Combine features into quality score
-            # This is a simplified scoring - real BRISQUE uses trained SVR model
-            features = np.array([
-                abs(mean_mscn),
-                std_mscn,
-                abs(skewness),
-                abs(kurtosis),
-                abs(mean_h),
-                std_h
-            ])
-            
-            # Simple linear combination (in practice, this would be learned)
-            weights = np.array([1.0, 2.0, 1.5, 1.5, 1.0, 1.0])
-            brisque_score = np.sum(features * weights)
-            
-            return float(brisque_score)
+            # Convert to float
+            return float(score.item())
             
         except Exception as e:
-            self.logger.warning(f"BRISQUE calculation failed: {e}")
-            return 100.0  # Return poor quality score on error
+            self.logger.error(f"BRISQUE calculation failed: {e}")
+            return None
     
-    def calculate_niqe(self, image: np.ndarray) -> float:
+    def calculate_niqe(self, image: np.ndarray) -> Optional[float]:
         """
         Calculate NIQE (Natural Image Quality Evaluator).
         
-        NIQE uses natural scene statistical models to predict how "natural" 
-        an image looks based on spatial domain NSS features.
+        Uses pyiqa's implementation with trained natural scene statistics.
+        NIQE scores typically range 0-10+, where lower is better quality.
+        
+        Typical ranges:
+        - Excellent: 0-3
+        - Good: 3-5
+        - Fair: 5-7
+        - Poor: 7+
         
         Args:
-            image: Input image (grayscale, uint8)
+            image: Input image (color or grayscale)
             
         Returns:
-            NIQE score (lower values indicate better quality)
+            NIQE score (lower is better quality) or None if unavailable
         """
+        if self.niqe_metric is None:
+            return None
+        
         try:
-            img = self._prepare_image(image).astype(np.float64)
+            # Prepare image as tensor
+            tensor = self._prepare_tensor(image)
+            if tensor is None:
+                return None
             
-            # Calculate local patches
-            patch_size = 6
-            h, w = img.shape
-            patches = []
+            # Calculate NIQE using pyiqa (returns tensor)
+            with torch.no_grad():
+                score = self.niqe_metric(tensor)
             
-            # Extract non-overlapping patches
-            for i in range(0, h - patch_size + 1, patch_size):
-                for j in range(0, w - patch_size + 1, patch_size):
-                    patch = img[i:i+patch_size, j:j+patch_size]
-                    if patch.shape == (patch_size, patch_size):
-                        patches.append(patch.flatten())
-            
-            if len(patches) == 0:
-                return 100.0  # Return poor quality if no patches
-            
-            patches = np.array(patches)
-            
-            # Calculate patch statistics
-            patch_means = np.mean(patches, axis=1)
-            patch_stds = np.std(patches, axis=1)
-            
-            # Calculate quality features based on natural scene statistics
-            # In real NIQE, these would be compared to learned natural scene model
-            
-            # Feature 1: Mean luminance distribution
-            mean_deviation = np.std(patch_means)
-            
-            # Feature 2: Contrast distribution  
-            contrast_deviation = np.std(patch_stds)
-            
-            # Feature 3: Spatial correlation (simplified)
-            spatial_corr = 0
-            if len(patches) > 1:
-                # Calculate correlation between adjacent patches
-                correlations = []
-                for i in range(len(patches) - 1):
-                    corr = np.corrcoef(patches[i], patches[i+1])[0,1]
-                    if not np.isnan(corr):
-                        correlations.append(abs(corr))
-                if correlations:
-                    spatial_corr = np.mean(correlations)
-            
-            # Feature 4: Local variance uniformity
-            variance_uniformity = np.std(patch_stds) / (np.mean(patch_stds) + 1e-8)
-            
-            # Combine features into NIQE score
-            # Real NIQE uses multivariate Gaussian model fitted to natural images
-            features = np.array([
-                mean_deviation,
-                contrast_deviation, 
-                spatial_corr,
-                variance_uniformity
-            ])
-            
-            # Simple distance-based scoring (simplified version)
-            # In practice, this uses Mahalanobis distance to natural image model
-            niqe_score = np.sqrt(np.sum(features ** 2))
-            
-            return float(niqe_score)
+            return float(score.item())
             
         except Exception as e:
-            self.logger.warning(f"NIQE calculation failed: {e}")
-            return 100.0  # Return poor quality score on error
+            self.logger.error(f"NIQE calculation failed: {e}")
+            return None
 
 
 def main():

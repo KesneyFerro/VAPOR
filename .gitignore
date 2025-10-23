@@ -97,11 +97,27 @@ data/models/
 data/results/
 data/cache/
 
+# VAPOR Pipeline Output Directories - Keep out of repo
+data/frames/
+data/metrics/
+data/point_clouds/
+data/reports/
+data/logs/
+
+# Pipeline run results and outputs
+runs/
+output/
+results/
+
 # Project specific - Metrics and CSV files
 *.csv
 data/frames/*.csv
 *_metrics.csv
 *metrics*.csv
+
+# Configuration overrides (keep template, ignore local configs)
+config/local_*.yaml
+config/*_local.yaml
 
 # Temporary files
 *.tmp
@@ -133,5 +149,10 @@ tensorboard_logs/
 *.cudnn
 *.cuda
 
+# Reconstruction data
+
+# Reconstruction data
+reconstruction/data/
+reconstruction/outputs/
 
 roadmap.md

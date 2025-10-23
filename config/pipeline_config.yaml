@@ -1,0 +1,187 @@
+# VAPOR Pipeline Configuration
+# This file controls all aspects of the VAPOR analysis pipeline
+
+# Pipeline Mode Settings
+pipeline:
+  # Mode: 'test' for small test runs, 'full' for complete processing
+  mode: 'test'  # Options: 'test', 'full'
+  
+  # Skip certain steps if needed
+  skip:
+    frame_extraction: false
+    blur_generation: false
+    deblur_processing: false
+    metrics_calculation: false
+    reconstruction: false
+  
+  # Skip already processed data (if false, will reprocess everything)
+  skip_existing: true  # Set to false to force reprocess blur/deblur even if output exists
+
+# Video Processing Settings
+video:
+  # Input video name (must be in data/videos/original/)
+  name: "4_32_slow_run_20250403_094922.avi"
+  
+  # Video time cropping settings (optional - crop video before frame extraction)
+  time_crop:
+    enabled: true        # Enable time cropping
+    start_time: 50.0     # Start time in seconds (start at 50 seconds)
+    end_time: null       # End time in seconds (null = use duration instead)
+    duration: 30.0       # Duration in seconds (30s for analysis)
+  
+  # Frame extraction settings
+  frame_extraction:
+    # Stride for frame extraction (1 = all frames, 3 = every 3rd frame)
+    stride: 3  # Process every 3rd frame for balance of speed and coverage
+    
+    # Maximum number of frames to extract (null = no limit)
+    max_frames: 400  # Increase from 300 for more frames
+    
+    # Cropping method for Region of Interest (ROI)
+    cropping:
+      method: "diagonal"  # Options: 'diagonal', 'content', 'none'
+      enabled: true
+    
+    # Force regenerate frames (delete existing frame folders before extraction)
+    force_regenerate: false  # Set to true to force regenerate frames even if they exist
+    
+    # Video generation from extracted frames
+    generate_video: false  # Set to true to generate video from extracted frames
+    
+    # Video generation for blur processing
+    generate_blur_videos: false    # Set to true to generate videos from blurred frames
+    generate_deblur_videos: false  # Set to true to generate videos from deblurred frames
+
+# Blur Processing Settings
+blur:
+  # Blur types to generate
+  types:
+    - "motion_blur"  # Primary blur type for this pipeline
+    # - "gaussian"
+    # - "defocus" 
+    # - "haze"
+    # - "combined"
+  
+  # Blur intensities to test
+  intensities:
+    - "high"  # Use high intensity for motion blur
+    # - "low"
+
+# Deblur Processing Settings
+deblur:
+  # Methods to run (current available methods only)
+  methods:
+    - "Restormer"
+    - "Uformer"
+    - "MPRNet"
+  
+  # For test mode, run selected methods
+  test_mode:
+    methods:
+      - "Restormer"      # Most reliable method first
+      - "MPRNet"         # Second method (fixed task parameter)
+      - "Uformer"        # Third method (fixed script name)
+  
+  # Performance settings
+  gpu_acceleration: true     # Enable GPU acceleration for deblur models
+  save_as_you_go: true      # Save frames immediately as they are processed (useful for monitoring progress)
+
+# Metrics Collection Settings
+metrics:
+  # Types of metrics to calculate
+  types:
+    no_reference: true      # BRISQUE, NIQE, etc.
+    full_reference: true    # PSNR, SSIM, etc. (using original as reference)
+    sharpness: true         # Various sharpness measures
+  
+  # Reference settings for full-reference metrics
+  reference:
+    # Use original frames as reference for blurred frames
+    original_as_reference: true
+
+# 3D Reconstruction Settings
+reconstruction:
+  # Feature detector and matcher settings
+  feature_detector: "disk"          # Options: 'disk', 'superpoint', 'sift'
+  matcher: "disk+lightglue"         # Options: 'disk+lightglue', 'superglue', 'superpoint+superglue'
+  
+  # Frame types to reconstruct
+  frame_types:
+    - "original"
+    - "blurred"      # All blur types/intensities
+    - "deblurred"    # All deblur methods
+  
+  # For test mode, only reconstruct subset
+  test_mode:
+    frame_types:
+      - "original"
+      - "blurred"     # Only motion_blur high
+      - "deblurred"   # Only Restormer results
+  
+  # Reconstruction parameters for high quality
+  settings:
+    min_num_inliers: 200        # Increased from 15 for better quality
+    max_num_trials: 25000       # Increased from 10000 for more thorough search
+    min_inlier_ratio: 0.85      # Increased from 0.3 for better geometry
+
+# Output Settings
+output:
+  # Base directories (relative to project root)
+  directories:
+    frames: "data/frames"
+    metrics: "data/metrics"
+    point_clouds: "data/point_clouds"
+    reports: "data/reports"
+    logs: "data/logs"
+  
+  # File naming conventions
+  naming:
+    # Include timestamp in output files
+    use_timestamp: true
+    # Include configuration hash for tracking
+    include_config_hash: true
+
+# Test Mode Specific Settings
+test_mode:
+  # Override settings when pipeline.mode = 'test'
+  video:
+    time_crop:
+      enabled: true
+      duration: 30.0     # Process first 30 seconds for analysis
+    frame_extraction:
+      stride: 3          # Every 3rd frame for balanced processing
+      max_frames: 300    # First 300 frames with stride 3
+  
+  blur:
+    types: ["motion_blur"]
+    intensities: ["high"]
+  
+  deblur:
+    methods: ["Restormer", "MPRNet", "Uformer"]  # Current available methods only
+  
+  reconstruction:
+    frame_types: ["original", "blurred", "deblurred"]
+    # Only process these specific combinations for test
+
+# Full Mode Specific Settings  
+full_mode:
+  # Override settings when pipeline.mode = 'full'
+  video:
+    frame_extraction:
+      stride: 3  # Extract every 3rd frame
+  
+  blur:
+    types: ["motion_blur"]  # Can be expanded
+    intensities: ["high"]   # Can be expanded
+  
+  deblur:
+    methods: ["Restormer", "Uformer", "MPRNet"]
+  
+  reconstruction:
+    frame_types: ["original", "blurred", "deblurred"]
+
+# Logging Settings
+logging:
+  level: "INFO"  # Options: 'DEBUG', 'INFO', 'WARNING', 'ERROR'
+  save_to_file: true
+  console_output: true

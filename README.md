@@ -29,10 +29,10 @@ python vapor_complete_pipeline.py --video pat3.mp4 --skip-blur --skip-reconstruc
 
 ```bash
 # 1. Generate blurred frames and videos (tested with pat3.mp4, stride 60)
-python blur/simple_blur_pipeline.py --video pat3.mp4 --stride 60
+python blur/blur_generator.py --video pat3.mp4 --stride 60
 
 # 2. Calculate comprehensive quality metrics with new structure
-python blur/metrics/updated_calculator.py --video pat3.mp4
+python blur/metrics/metrics_calculator.py --video pat3.mp4
 
 # 3. Run 3D reconstruction analysis using maploc integration
 python reconstruction/reconstruction_pipeline.py --video pat3.mp4
@@ -111,10 +111,10 @@ python vapor_complete_pipeline.py --video pat3.mp4 --skip-blur --skip-metrics
 
 ```bash
 # Generate blur effects (tested configuration)
-python blur/simple_blur_pipeline.py --video pat3.mp4 --stride 60
+python blur/blur_generator.py --video pat3.mp4 --stride 60
 
 # Calculate comprehensive metrics
-python blur/metrics/updated_calculator.py --video pat3.mp4
+python blur/metrics/metrics_calculator.py --video pat3.mp4
 
 # Run 3D reconstruction with specific algorithms
 python reconstruction/reconstruction_pipeline.py --video pat3.mp4 --feature disk --matcher disk+lightglue
@@ -122,8 +122,8 @@ python reconstruction/reconstruction_pipeline.py --video pat3.mp4 --feature disk
 # Setup deblurring environments
 python blur/fx_02_deblur/setup_repositories.py --method Restormer
 
-# Run deblurring with specific method
-python blur/fx_02_deblur/deblur_cli.py --input blurred_frames/ --output deblurred/ --method Restormer
+# Run deblurring example (see deblur_example_usage.py for details)
+python blur/fx_02_deblur/deblur_example_usage.py --input blurred_frames/ --output deblurred/ --method Restormer
 ```
 
 ### **Advanced Configuration**
@@ -133,7 +133,7 @@ python blur/fx_02_deblur/deblur_cli.py --input blurred_frames/ --output deblurre
 python reconstruction/reconstruction_pipeline.py --video pat3.mp4 --feature superpoint --matcher superglue
 
 # Process with custom stride for faster processing
-python blur/simple_blur_pipeline.py --video pat3.mp4 --stride 120
+python blur/blur_generator.py --video pat3.mp4 --stride 120
 
 # Setup specific deblurring method only
 python blur/fx_02_deblur/setup_repositories.py --method DeblurGANv2
@@ -154,8 +154,8 @@ python blur/fx_02_deblur/setup_repositories.py --method DeblurGANv2
 
 **Advanced Deblurring (blur/fx_02_deblur/):**
 
-- **6 Integrated Models**: DeblurGANv2, Restormer, Uformer, MPRNet, DPIR, DeblurDiNAT
-- **Unified CLI**: `blur/fx_02_deblur/deblur_cli.py` with conda environment switching
+- **5 Integrated Models**: DeblurGANv2, Restormer, Uformer, MPRNet, DPIR
+- **Example Usage**: `blur/fx_02_deblur/deblur_example_usage.py` shows how to use deblurring methods
 - **Environment Management**: Automatic conda environment setup and switching
 - **Batch Processing**: Process entire directories with multiple methods
 
@@ -204,7 +204,7 @@ python blur/fx_02_deblur/setup_repositories.py --method DeblurGANv2
 Extract frames from video and apply systematic blur effects using deterministic kernels:
 
 ```bash
-python blur/simple_blur_pipeline.py --video pat3.mp4 --stride 60
+python blur/blur_generator.py --video pat3.mp4 --stride 60
 ```
 
 - Tested with pat3.mp4 using stride 60 for efficient processing
@@ -216,7 +216,7 @@ python blur/simple_blur_pipeline.py --video pat3.mp4 --stride 60
 Calculate comprehensive quality metrics for all frame types using the new organized structure:
 
 ```bash
-python blur/metrics/updated_calculator.py --video pat3.mp4
+python blur/metrics/metrics_calculator.py --video pat3.mp4
 ```
 
 - Processes original, blurred, and deblurred frames separately
@@ -279,8 +279,8 @@ Complete documentation is organized in the `docs/` directory:
 
 - **`blur/`**: Complete blur processing pipeline with deterministic effects
   - `fx_01_blur/`: Blur generation with deterministic kernel system (`kernels/generator.py`)
-  - `fx_02_deblur/`: 6 integrated deblurring models with unified CLI (`deblur_cli.py`)
-  - `metrics/`: Comprehensive quality assessment system (`calculator.py`)
+  - `fx_02_deblur/`: 6 integrated deblurring models with example usage (`deblur_example_usage.py`)
+  - `metrics/`: Comprehensive quality assessment system (`metrics_calculator.py`)
   - `runs/`: Advanced experiment logging and tracking (`experiment_logger.py`, `vapor_logger.py`)
 - **`reconstruction/`**: 3D reconstruction pipeline with maploc integration
 - **`utils/`**: Shared utilities for video processing, ROI detection, and file management (`core_utilities.py`)
@@ -289,8 +289,8 @@ Complete documentation is organized in the `docs/` directory:
 ### **Key Scripts & Their Status**
 
 - **`vapor_complete_pipeline.py`**: ✅ Master controller for complete analysis - **TESTED & WORKING**
-- **`blur/simple_blur_pipeline.py`**: ✅ Simplified blur processing pipeline - **TESTED with pat3.mp4, stride 60**
-- **`metrics_calculator.py`**: ✅ Updated metrics calculation with new structure - **COMPLETE**
+- **`blur/blur_generator.py`**: ✅ Blur generation pipeline - **TESTED with pat3.mp4, stride 60**
+- **`blur/metrics/metrics_calculator.py`**: ✅ Metrics calculation with organized structure - **COMPLETE**
 - **`reconstruction_pipeline.py`**: ✅ 3D reconstruction with maploc integration - **COMPLETE**
 - **`setup_vapor_maploc.py`**: ✅ Setup script for maploc integration - **COMPLETE**
 
@@ -339,9 +339,9 @@ Complete documentation is organized in the `docs/` directory:
 
 ### **Advanced Deblurring Integration (blur/fx_02_deblur/)**
 
-**Unified CLI System (`deblur_cli.py`):**
+**Example Usage Script (`deblur_example_usage.py`):**
 
-- Single interface for 6 different deblurring models
+- Shows how to use 6 different deblurring models
 - Automatic conda environment switching
 - Batch processing with progress tracking
 - Performance comparison across methods
@@ -351,7 +351,6 @@ Complete documentation is organized in the `docs/` directory:
 - **DeblurGANv2**: GAN-based deblurring with adversarial training
 - **Restormer**: Transformer-based restoration with multi-scale processing
 - **Uformer**: U-Net with transformer blocks for efficient deblurring
-- **DeblurDiNAT**: Dilated neighborhood attention transformer
 - **DPIR**: Deep plug-and-play image restoration
 - **MPRNet**: Multi-patch relationship network
 
@@ -392,10 +391,10 @@ python vapor_complete_pipeline.py --video pat3.mp4 --skip-blur
 
 ```bash
 # 1. Generate blurred frames
-python blur/simple_blur_pipeline.py --video pat3.mp4 --stride 60
+python blur/blur_generator.py --video pat3.mp4 --stride 60
 
 # 2. Calculate quality metrics
-python blur/metrics/updated_calculator.py --video pat3.mp4
+python blur/metrics/metrics_calculator.py --video pat3.mp4
 
 # 3. Run 3D reconstruction
 python reconstruction/reconstruction_pipeline.py --video pat3.mp4 --feature disk

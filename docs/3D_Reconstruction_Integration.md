@@ -43,10 +43,10 @@ python vapor_complete_pipeline.py --video pat3.mp4 --skip-blur --skip-reconstruc
 
 ```bash
 # 1. Generate blurred frames (if not done already)
-python blur/simple_blur_pipeline.py --video pat3.mp4 --stride 60
+python blur/blur_generator.py --video pat3.mp4 --stride 60
 
 # 2. Calculate metrics with new structure
-python blur/metrics/updated_calculator.py --video pat3.mp4
+python blur/metrics/metrics_calculator.py --video pat3.mp4
 
 # 3. Run 3D reconstruction analysis
 python reconstruction/reconstruction_pipeline.py --video pat3.mp4
@@ -118,14 +118,14 @@ pip install h5py plotly
 
 ```bash
 # Extract frames with stride and apply blur effects
-python blur/simple_blur_pipeline.py --video pat3.mp4 --stride 60
+python blur/blur_generator.py --video pat3.mp4 --stride 60
 ```
 
 ### **Step 2: Quality Metrics**
 
 ```bash
 # Calculate comprehensive quality metrics
-python blur/metrics/updated_calculator.py --video pat3.mp4
+python blur/metrics/metrics_calculator.py --video pat3.mp4
 ```
 
 ### **Step 3: 3D Reconstruction**

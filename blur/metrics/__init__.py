@@ -3,11 +3,11 @@
 from .full_reference import FullReferenceMetrics
 from .no_reference import NoReferenceMetrics  
 from .sharpness import SharpnessMetrics
-from .calculator import MetricsCalculator
+from .metrics_calculator import VAPORMetricsCalculator
 
 __all__ = [
     'FullReferenceMetrics',
     'NoReferenceMetrics', 
     'SharpnessMetrics',
-    'MetricsCalculator'
+    'VAPORMetricsCalculator'
 ]

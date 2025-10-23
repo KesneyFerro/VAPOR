@@ -1,0 +1,23 @@
+{
+  "setup_date": "1759270248.0963163",
+  "environments": {
+    "Restormer": {
+      "conda_env": "restormer",
+      "python_version": "3.8",
+      "folder": "Restormer",
+      "repository": "https://github.com/swz30/Restormer.git"
+    },
+    "Uformer": {
+      "conda_env": "uformer",
+      "python_version": "3.8",
+      "folder": "Uformer",
+      "repository": "https://github.com/ZhendongWang6/Uformer.git"
+    },
+    "MPRNet": {
+      "conda_env": "mprnet",
+      "python_version": "3.8",
+      "folder": "MPRNet",
+      "repository": "https://github.com/swz30/MPRNet.git"
+    }
+  }
+}

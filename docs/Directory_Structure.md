@@ -17,18 +17,18 @@ VAPOR/
 │   │   ├── MPRNet/               # MPRNet model
 │   │   ├── DPIR/                 # DPIR model
 │   │   ├── DeblurDiNAT/          # DeblurDiNAT model
-│   │   ├── deblur_cli.py         # Unified deblurring CLI
+│   │   ├── deblur_example_usage.py  # Example deblurring usage
 │   │   └── setup_repositories.py # Repository setup script
 │   ├── metrics/                  # Quality metrics calculation
-│   │   ├── calculator.py         # Unified metrics calculator
+│   │   ├── metrics_calculator.py # Unified metrics calculator
 │   │   ├── full_reference.py     # Full-reference metrics (SSIM, PSNR)
 │   │   ├── no_reference.py       # No-reference metrics (BRISQUE)
 │   │   └── sharpness.py          # Sharpness metrics
 │   ├── runs/                     # Experiment logging
 │   │   ├── experiment_logger.py  # Experiment tracking
 │   │   └── vapor_logger.py       # VAPOR-specific logging
-│   ├── main.py                   # Original main blur pipeline
-│   └── simple_blur_pipeline.py   # Simplified working pipeline
+│   ├── blur_example_usage.py     # Example blur pipeline usage
+│   └── blur_generator.py         # Main blur generation pipeline
 ├── data/                         # Data organization (NEW STRUCTURE)
 │   ├── videos/
 │   │   ├── original/             # Input videos
@@ -116,10 +116,10 @@ OUTPUT:
 
 | Directory            | Purpose                  | Key Files                                        |
 | -------------------- | ------------------------ | ------------------------------------------------ |
-| `blur/`              | Blur processing pipeline | `simple_blur_pipeline.py`, `main.py`             |
+| `blur/`              | Blur processing pipeline | `blur_generator.py`, `blur_example_usage.py`     |
 | `blur/fx_01_blur/`   | Blur generation          | `kernels/generator.py`, `effects/blur_engine.py` |
-| `blur/fx_02_deblur/` | Deblurring models        | `deblur_cli.py`, model directories               |
-| `blur/metrics/`      | Quality assessment       | `calculator.py`, metric modules                  |
+| `blur/fx_02_deblur/` | Deblurring models        | `deblur_example_usage.py`, model directories     |
+| `blur/metrics/`      | Quality assessment       | `metrics_calculator.py`, metric modules          |
 | `data/`              | Organized data storage   | Frame, metric, and point cloud files             |
 | `docs/`              | Documentation            | Setup guides, integration docs                   |
 | `reconstruction/`    | 3D reconstruction        | `maploc/` integration                            |
@@ -129,19 +129,19 @@ OUTPUT:
 
 ### **For Blur Processing:**
 
-- Main pipeline: `blur/simple_blur_pipeline.py`
+- Main pipeline: `blur/blur_generator.py`
+- Example usage: `blur/blur_example_usage.py`
 - Kernel generation: `blur/fx_01_blur/kernels/generator.py`
 - Blur effects: `blur/fx_01_blur/effects/blur_engine.py`
 
 ### **For Deblurring:**
 
-- CLI interface: `blur/fx_02_deblur/deblur_cli.py`
+- Example usage: `blur/fx_02_deblur/deblur_example_usage.py`
 - Setup guide: `blur/fx_02_deblur/DEBLUR_SETUP_GUIDE.md`
 
 ### **For Metrics:**
 
-- Calculator: `blur/metrics/calculator.py`
-- Updated calculator: `blur/metrics/updated_calculator.py`
+- Calculator: `blur/metrics/metrics_calculator.py`
 
 ### **For 3D Reconstruction:**
 
