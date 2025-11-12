@@ -449,6 +449,16 @@ class VAPORReconstructionPipeline:
                     except Exception as e:
                         self.logger.error(f"  Failed to copy PLY to data directory: {e}")
                 
+                # Generate per-image contribution report if in pipeline mode
+                if self.pipeline_mode:
+                    self.generate_per_image_contribution_report(
+                        model=trial_config.model,
+                        features_path=trial_config.featurePath,
+                        matches_path=trial_config.matchPath,
+                        output_name=output_name,
+                        frame_type=frame_type
+                    )
+                
                 # Calculate reconstruction statistics with enhanced metrics
                 stats = self._calculate_reconstruction_stats(
                     model=trial_config.model,
@@ -655,30 +665,48 @@ class VAPORReconstructionPipeline:
             match_counts = []
             
             with h5py.File(matches_path, 'r') as f:
-                for pair_key in f.keys():
-                    total_pairs += 1
+                # Handle nested structure: image1/image2/matches0
+                for img1_name in f.keys():
+                    img1_group = f[img1_name]
                     
-                    if 'matches0' in f[pair_key]:
-                        matches = f[pair_key]['matches0'][()]
-                        num_matches = np.sum(matches >= 0)
-                        
-                        if num_matches > 0:
-                            successful_pairs += 1
-                            match_counts.append(num_matches)
+                    # Check if this is a group containing other images
+                    if isinstance(img1_group, h5py.Group):
+                        for img2_name in img1_group.keys():
+                            total_pairs += 1
+                            img2_group = img1_group[img2_name]
+                            
+                            # Look for match data
+                            if isinstance(img2_group, h5py.Group) and 'matches0' in img2_group:
+                                matches = img2_group['matches0'][()]
+                                num_matches = np.sum(matches >= 0)
+                                
+                                if num_matches > 0:
+                                    successful_pairs += 1
+                                    match_counts.append(num_matches)
+                            elif isinstance(img2_group, h5py.Dataset):
+                                # Sometimes matches are stored directly as dataset
+                                matches = img2_group[()]
+                                if matches.size > 0:
+                                    num_matches = np.sum(matches >= 0) if matches.ndim > 0 else (1 if matches >= 0 else 0)
+                                    if num_matches > 0:
+                                        successful_pairs += 1
+                                        match_counts.append(num_matches)
             
             return {
                 'total_pairs_attempted': total_pairs,
                 'successful_pairs': successful_pairs,
                 'pair_success_rate': successful_pairs / total_pairs if total_pairs > 0 else 0,
                 'match_statistics': {
-                    'mean_matches_per_pair': np.mean(match_counts) if match_counts else 0,
-                    'std_matches_per_pair': np.std(match_counts) if match_counts else 0,
-                    'min_matches': np.min(match_counts) if match_counts else 0,
-                    'max_matches': np.max(match_counts) if match_counts else 0,
+                    'mean_matches_per_pair': float(np.mean(match_counts)) if match_counts else 0,
+                    'std_matches_per_pair': float(np.std(match_counts)) if match_counts else 0,
+                    'min_matches': int(np.min(match_counts)) if match_counts else 0,
+                    'max_matches': int(np.max(match_counts)) if match_counts else 0,
                 }
             }
         except Exception as e:
             self.logger.warning(f"Could not collect matching metrics: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
             return {}
     
     def _collect_point_cloud_metrics(self, model) -> dict:
@@ -747,6 +775,221 @@ class VAPORReconstructionPipeline:
             self.logger.warning(f"Could not collect point cloud metrics: {e}")
             return {}
     
+    def generate_per_image_contribution_report(self, model, features_path: Path, matches_path: Path, 
+                                               output_name: str, frame_type: str) -> Path:
+        """
+        Generate a comprehensive per-image contribution analysis report.
+        
+        For each image, provides:
+        - Registration status (was it successfully registered?)
+        - Feature detection (how many features were detected?)
+        - Matching statistics (how many matches with other images?)
+        - 3D contribution (how many 3D points does it observe?)
+        - Reprojection quality (what's the average reprojection error?)
+        - Pose information (camera position and orientation)
+        - Contribution ranking (how important is this image?)
+        
+        Returns:
+            Path to the saved CSV report
+        """
+        try:
+            self.logger.info(f"  Generating per-image contribution report...")
+            
+            per_image_data = []
+            
+            # Load features
+            features = {}
+            if features_path and features_path.exists():
+                with h5py.File(features_path, 'r') as f:
+                    for img_name in f.keys():
+                        if 'keypoints' in f[img_name]:
+                            features[img_name] = len(f[img_name]['keypoints'])
+            
+            # Load matches (nested structure)
+            matches_per_image = {}  # image_name -> list of (partner_name, num_matches)
+            if matches_path and matches_path.exists():
+                with h5py.File(matches_path, 'r') as f:
+                    for img1_name in f.keys():
+                        if img1_name not in matches_per_image:
+                            matches_per_image[img1_name] = []
+                        
+                        img1_group = f[img1_name]
+                        if isinstance(img1_group, h5py.Group):
+                            for img2_name in img1_group.keys():
+                                img2_group = img1_group[img2_name]
+                                
+                                # Count matches
+                                num_matches = 0
+                                if isinstance(img2_group, h5py.Group) and 'matches0' in img2_group:
+                                    matches = img2_group['matches0'][()]
+                                    num_matches = int(np.sum(matches >= 0))
+                                elif isinstance(img2_group, h5py.Dataset):
+                                    matches = img2_group[()]
+                                    if matches.size > 0:
+                                        num_matches = int(np.sum(matches >= 0)) if matches.ndim > 0 else (1 if matches >= 0 else 0)
+                                
+                                if num_matches > 0:
+                                    matches_per_image[img1_name].append((img2_name, num_matches))
+                                    
+                                    # Add reverse relationship
+                                    if img2_name not in matches_per_image:
+                                        matches_per_image[img2_name] = []
+                                    matches_per_image[img2_name].append((img1_name, num_matches))
+            
+            # Get all image names from model
+            registered_images = {img.name: img for img in model.images.values()}
+            
+            # Process each image
+            all_image_names = set(features.keys()) | set(registered_images.keys())
+            
+            for img_name in sorted(all_image_names):
+                row = {
+                    'image_name': img_name,
+                    'frame_number': self._extract_frame_number(img_name),
+                }
+                
+                # Registration status
+                is_registered = img_name in registered_images
+                row['is_registered'] = is_registered
+                
+                # Feature detection
+                row['num_features_detected'] = features.get(img_name, 0)
+                
+                # Matching statistics
+                image_matches = matches_per_image.get(img_name, [])
+                row['num_matched_pairs'] = len(image_matches)
+                row['total_matches'] = sum(m[1] for m in image_matches)
+                row['avg_matches_per_pair'] = row['total_matches'] / row['num_matched_pairs'] if row['num_matched_pairs'] > 0 else 0
+                row['max_matches_with_single_image'] = max([m[1] for m in image_matches], default=0)
+                
+                if is_registered:
+                    image = registered_images[img_name]
+                    
+                    # 3D point observations
+                    observed_points = [pid for pid, point in model.points3D.items() 
+                                     if any(elem.image_id == image.image_id for elem in point.track.elements)]
+                    row['num_3d_points_observed'] = len(observed_points)
+                    
+                    # Reprojection error
+                    errors = []
+                    for pid in observed_points:
+                        point = model.points3D[pid]
+                        errors.append(point.error)
+                    row['mean_reprojection_error'] = float(np.mean(errors)) if errors else 0.0
+                    row['std_reprojection_error'] = float(np.std(errors)) if errors else 0.0
+                    
+                    # Pose information
+                    try:
+                        if hasattr(image.cam_from_world, 'inverse'):
+                            pose = image.cam_from_world.inverse()
+                        else:
+                            pose = image.cam_from_world
+                        
+                        translation = pose.translation
+                        rotation = pose.rotation.quat
+                        
+                        row['camera_x'] = float(translation[0])
+                        row['camera_y'] = float(translation[1])
+                        row['camera_z'] = float(translation[2])
+                        row['quat_w'] = float(rotation[0])
+                        row['quat_x'] = float(rotation[1])
+                        row['quat_y'] = float(rotation[2])
+                        row['quat_z'] = float(rotation[3])
+                    except Exception as e:
+                        self.logger.debug(f"Could not extract pose for {img_name}: {e}")
+                        row['camera_x'] = row['camera_y'] = row['camera_z'] = 0.0
+                        row['quat_w'] = row['quat_x'] = row['quat_y'] = row['quat_z'] = 0.0
+                    
+                    # Contribution score (weighted combination of metrics)
+                    # Higher is better
+                    contribution_score = (
+                        row['num_3d_points_observed'] * 10.0 +  # Primary contribution
+                        row['num_matched_pairs'] * 5.0 +         # Connectivity
+                        row['total_matches'] * 0.1 -             # Match quality
+                        row['mean_reprojection_error'] * 100.0  # Accuracy penalty
+                    )
+                    row['contribution_score'] = float(contribution_score)
+                    
+                else:
+                    # Not registered
+                    row['num_3d_points_observed'] = 0
+                    row['mean_reprojection_error'] = 0.0
+                    row['std_reprojection_error'] = 0.0
+                    row['camera_x'] = row['camera_y'] = row['camera_z'] = 0.0
+                    row['quat_w'] = row['quat_x'] = row['quat_y'] = row['quat_z'] = 0.0
+                    row['contribution_score'] = 0.0
+                
+                per_image_data.append(row)
+            
+            # Sort by contribution score (descending)
+            per_image_data.sort(key=lambda x: x['contribution_score'], reverse=True)
+            
+            # Add rank
+            for i, row in enumerate(per_image_data):
+                row['contribution_rank'] = i + 1
+            
+            # Save to CSV - should be in data/metrics/{video_stem}/per_image_reports/
+            # In pipeline mode: metrics_dir = data/metrics/{video_stem}/run_{timestamp}
+            # We want: data/metrics/{video_stem}/per_image_reports/
+            if self.pipeline_mode:
+                # Go up one level from run_XXX to video_stem, then into per_image_reports
+                output_dir = self.data_manager.metrics_dir.parent / "per_image_reports"
+            else:
+                # In standalone mode, use the test output location
+                output_dir = self.data_manager.metrics_dir / "per_image_reports"
+            
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            csv_path = output_dir / f"{output_name}_per_image_contribution.csv"
+            
+            import csv
+            fieldnames = [
+                'contribution_rank', 'image_name', 'frame_number', 'is_registered',
+                'num_features_detected', 'num_matched_pairs', 'total_matches', 
+                'avg_matches_per_pair', 'max_matches_with_single_image',
+                'num_3d_points_observed', 'mean_reprojection_error', 'std_reprojection_error',
+                'camera_x', 'camera_y', 'camera_z', 
+                'quat_w', 'quat_x', 'quat_y', 'quat_z',
+                'contribution_score'
+            ]
+            
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(per_image_data)
+            
+            self.logger.info(f"  Per-image contribution report saved: {csv_path}")
+            
+            # Generate summary statistics
+            registered_count = sum(1 for row in per_image_data if row['is_registered'])
+            avg_contribution = np.mean([row['contribution_score'] for row in per_image_data if row['is_registered']])
+            
+            self.logger.info(f"  Summary: {registered_count}/{len(per_image_data)} images registered")
+            self.logger.info(f"  Average contribution score: {avg_contribution:.2f}")
+            
+            # Identify problematic images (not registered but have features)
+            problematic = [row for row in per_image_data 
+                          if not row['is_registered'] and row['num_features_detected'] > 0]
+            if problematic:
+                self.logger.warning(f"  {len(problematic)} images have features but failed to register:")
+                for row in problematic[:5]:  # Show first 5
+                    self.logger.warning(f"    - {row['image_name']}: {row['num_features_detected']} features, "
+                                      f"{row['num_matched_pairs']} matched pairs")
+            
+            return csv_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate per-image contribution report: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return None
+    
+    def _extract_frame_number(self, image_name: str) -> int:
+        """Extract frame number from image filename."""
+        import re
+        match = re.search(r'(\d+)\.(?:png|jpg|jpeg)$', image_name)
+        return int(match.group(1)) if match else 0
+    
     def run_complete_pipeline(self):
         """Run the complete reconstruction pipeline."""
         if self.folder_mode:
@@ -754,6 +997,53 @@ class VAPORReconstructionPipeline:
         else:
             return self.run_video_pipeline()
             
+    def _check_initial_transformation(self) -> bool:
+        """
+        Prompt user to create/place initial transformation matrix and verify it exists.
+        
+        Returns:
+            True if initial transformation is found, False otherwise
+        """
+        # Determine where the transformation should be
+        initial_transform_file = self.point_clouds_base / "initial_transformation.txt"
+        
+        self.logger.info("\n" + "="*80)
+        self.logger.info("INITIAL TRANSFORMATION REQUIRED FOR ICP REGISTRATION")
+        self.logger.info("="*80)
+        self.logger.info(f"\nPlease create the initial transformation matrix file:")
+        self.logger.info(f"  Location: {initial_transform_file}")
+        self.logger.info(f"\nThe file should contain a 4x4 transformation matrix in the format:")
+        self.logger.info(f"  -1.324484109879 -1.483755350113 0.880392253399 115.265403747559")
+        self.logger.info(f"  -1.550405263901 1.510512351990 0.213249132037 174.122238159180")
+        self.logger.info(f"  -0.756877481937 -0.497696936131 -1.977451205254 -81.323654174805")
+        self.logger.info(f"  0.000000000000 0.000000000000 0.000000000000 1.000000000000")
+        
+        # Retry loop for user confirmation
+        while True:
+            input("\nPress ENTER once you have created the initial_transformation.txt file...")
+            
+            # Check if file exists
+            if initial_transform_file.exists():
+                # Try to load and validate it
+                try:
+                    transformation = np.loadtxt(str(initial_transform_file))
+                    if transformation.shape != (4, 4):
+                        self.logger.error(f"ERROR: Transformation matrix must be 4x4, got {transformation.shape}")
+                        self.logger.info("Please fix the file and try again.")
+                        continue
+                    
+                    self.logger.info(f"✓ Initial transformation found and validated!")
+                    self.logger.info(f"  Location: {initial_transform_file}")
+                    return True
+                except Exception as e:
+                    self.logger.error(f"ERROR: Failed to load transformation matrix: {e}")
+                    self.logger.info("Please check the file format and try again.")
+                    continue
+            else:
+                self.logger.error(f"ERROR: File not found: {initial_transform_file}")
+                self.logger.info("Please create the file and try again.")
+                continue
+
     def run_video_pipeline(self):
         """Run the complete reconstruction pipeline on all available frame sets for a video."""
         self.logger.info("="*80)
@@ -792,8 +1082,17 @@ class VAPORReconstructionPipeline:
         self._create_reconstruction_summary(all_results)
         
         self.logger.info("\n" + "="*80)
-        self.logger.info("RECONSTRUCTION PIPELINE COMPLETED")
+        self.logger.info("RECONSTRUCTION COMPLETED - PROCEED WITH REGISTRATION")
         self.logger.info("="*80)
+        
+        # Check for initial transformation before registration
+        if not self._check_initial_transformation():
+            self.logger.error("Initial transformation not found - skipping ICP registration")
+            return len(all_results) > 0
+        
+        # Proceed with ICP registration using the initial transformation
+        self.logger.info("\nStarting ICP registration with initial transformation...")
+        # Registration will be called by main pipeline if successful
         
         return len(all_results) > 0
     

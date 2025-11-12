@@ -25,7 +25,8 @@ import yaml
 class VAPORCompletePipeline:
     """Master pipeline controller for VAPOR analysis."""
     
-    def __init__(self, video_name: str, skip_blur: bool = False, skip_metrics: bool = False, skip_reconstruction: bool = False):
+    def __init__(self, video_name: str, skip_blur: bool = False, skip_metrics: bool = False, 
+                 skip_reconstruction: bool = False, manual_crop: bool = False):
         """Initialize the complete pipeline.
         
         Args:
@@ -33,12 +34,14 @@ class VAPORCompletePipeline:
             skip_blur: Skip blur generation if frames already exist
             skip_metrics: Skip metrics calculation
             skip_reconstruction: Skip 3D reconstruction
+            manual_crop: Use manual 4-corner or two-point crop selection
         """
         self.video_name = video_name
         self.video_stem = Path(video_name).stem
         self.skip_blur = skip_blur
         self.skip_metrics = skip_metrics
         self.skip_reconstruction = skip_reconstruction
+        self.manual_crop = manual_crop
         
         # Generate unique run ID for this pipeline execution
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -195,6 +198,8 @@ class VAPORCompletePipeline:
                 cmd.extend(["--start-time", str(start_time)])
             if duration is not None:
                 cmd.extend(["--duration", str(duration)])
+            if self.manual_crop:
+                cmd.append("--manual-crop")
             
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=self.base_dir)
             
@@ -207,6 +212,100 @@ class VAPORCompletePipeline:
                 
         except Exception as e:
             self.logger.error(f"Error running blur generation: {e}")
+            return False
+    
+    def _run_deblur_on_directory(self, input_dir, output_dir, method):
+        """Helper method to run deblur processing on a directory.
+        
+        Args:
+            input_dir: Path to input frames directory
+            output_dir: Path to output directory
+            method: Deblur method name (Restormer, MPRNet, or Uformer)
+        """
+        # Map method names to module script names and conda environments
+        method_info = {
+            'Restormer': {'script': 'restormer_module.py', 'conda_env': 'restormer'},
+            'MPRNet': {'script': 'mprnet_module.py', 'conda_env': 'base'}, 
+            'Uformer': {'script': 'uformer_module.py', 'conda_env': 'uformer'}
+        }
+        
+        method_config = method_info.get(method)
+        if not method_config:
+            self.logger.warning(f"Unknown method: {method}, skipping...")
+            return False
+        
+        # Build command to run in correct conda environment
+        module_path = self.base_dir / "blur" / "fx_02_deblur" / "modules" / "blur_modules" / method_config['script']
+        
+        # Use conda run to execute in the correct environment
+        if method_config['conda_env'] == 'base':
+            # For MPRNet, use current python environment
+            cmd = [sys.executable, str(module_path),
+                   "--input_dir", str(input_dir),
+                   "--output_dir", str(output_dir)]
+        else:
+            # For Restormer and Uformer, use conda run with specific environment
+            cmd = ["conda", "run", "-n", method_config['conda_env'], "python",
+                   str(module_path),
+                   "--input_dir", str(input_dir),
+                   "--output_dir", str(output_dir)]
+        
+        # Set PYTHONPATH to include project root
+        import os
+        env = os.environ.copy()
+        env['PYTHONPATH'] = str(self.base_dir)
+        
+        # Run the module with real-time output
+        self.logger.info(f"Executing: {' '.join(cmd)}")
+        self.logger.info(f"Conda environment: {method_config['conda_env']}")
+        self.logger.info(f"Output directory: {output_dir}")
+        
+        # Use Popen for real-time output
+        process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT,
+            text=True, 
+            cwd=self.base_dir, 
+            env=env,
+            bufsize=1,
+            universal_newlines=True,
+            shell=(method_config['conda_env'] != 'base')  # Use shell for conda run commands
+        )
+        
+        # Stream output in real-time
+        output_lines = []
+        for line in iter(process.stdout.readline, ''):
+            if line.strip():  # Only print non-empty lines
+                print(f"[{method}] {line.rstrip()}")  # Print to console immediately
+                output_lines.append(line)
+        
+        # Wait for process to complete
+        return_code = process.wait()
+        
+        if return_code == 0:
+            self.logger.info(f"[OK] {method} processing completed")
+            self.logger.info(f"Results saved to: {output_dir}")
+            
+            # Verify output files were created
+            output_files = list(output_dir.glob("*.png")) + list(output_dir.glob("*.jpg"))
+            self.logger.info(f"Generated {len(output_files)} output files")
+            return True
+        else:
+            self.logger.error(f"{method} processing failed with return code {return_code}")
+            
+            # Check for common conda environment issues
+            if method_config['conda_env'] != 'base':
+                if "No module named" in ''.join(output_lines):
+                    self.logger.error(f"Missing dependencies in conda environment '{method_config['conda_env']}'")
+                elif "conda: command not found" in ''.join(output_lines):
+                    self.logger.error("Conda is not available in PATH.")
+                elif f"Could not find conda environment: {method_config['conda_env']}" in ''.join(output_lines):
+                    self.logger.error(f"Conda environment '{method_config['conda_env']}' does not exist")
+            
+            # Log the captured output for debugging
+            if output_lines:
+                self.logger.error(f"Output: {''.join(output_lines[-10:])}")  # Last 10 lines
             return False
             
     def run_deblur_processing(self):
@@ -249,18 +348,6 @@ class VAPORCompletePipeline:
                 for method in deblur_methods:
                     self.logger.info(f"Running {method} on {blur_method_name}...")
                     
-                    # Map method names to module script names and conda environments
-                    method_info = {
-                        'Restormer': {'script': 'restormer_module.py', 'conda_env': 'restormer'},
-                        'MPRNet': {'script': 'mprnet_module.py', 'conda_env': 'base'}, 
-                        'Uformer': {'script': 'uformer_module.py', 'conda_env': 'uformer'}
-                    }
-                    
-                    method_config = method_info.get(method)
-                    if not method_config:
-                        self.logger.warning(f"Unknown method: {method}, skipping...")
-                        continue
-                    
                     # Set correct output directory: data/frames/deblurred/{video_stem}/{method_name}/
                     output_dir = self.base_dir / "data" / "frames" / "deblurred" / self.video_stem / method
                     output_dir.mkdir(parents=True, exist_ok=True)
@@ -277,82 +364,40 @@ class VAPORCompletePipeline:
                         elif existing_files:
                             self.logger.info(f"[PARTIAL] {method} on {blur_method_name} has {len(existing_files)}/{len(input_files)} files, will reprocess")
                     
-                    # Build command to run in correct conda environment
-                    module_path = self.base_dir / "blur" / "fx_02_deblur" / "modules" / "blur_modules" / method_config['script']
+                    # Run deblur on this directory
+                    self._run_deblur_on_directory(input_dir, output_dir, method)
+            
+            # Process original frames with deblur if configured
+            process_original = self.config.get('deblur', {}).get('process_original_frames', False)
+            original_method = self.config.get('deblur', {}).get('original_deblur_method', 'Restormer')
+            
+            if process_original and original_method in available_methods:
+                self.logger.info(f"Processing original frames with {original_method}...")
+                
+                # Path to original frames
+                original_frames_dir = self.base_dir / "data" / "frames" / "original" / self.video_stem
+                
+                if not original_frames_dir.exists():
+                    self.logger.warning(f"Original frames directory not found: {original_frames_dir}")
+                else:
+                    # Output directory for deblurred original frames
+                    output_dir = self.base_dir / "data" / "frames" / "deblurred" / self.video_stem / f"{original_method}_original"
+                    output_dir.mkdir(parents=True, exist_ok=True)
                     
-                    # Use conda run to execute in the correct environment
-                    if method_config['conda_env'] == 'base':
-                        # For MPRNet, use current python environment
-                        cmd = [sys.executable, str(module_path),
-                               "--input_dir", str(input_dir),
-                               "--output_dir", str(output_dir)]
+                    # Check if already processed
+                    skip_existing = self.config.get('pipeline', {}).get('skip_existing', False)
+                    if skip_existing:
+                        existing_files = list(output_dir.glob("*.png")) + list(output_dir.glob("*.jpg"))
+                        input_files = list(original_frames_dir.glob("*.png")) + list(original_frames_dir.glob("*.jpg"))
+                        
+                        if existing_files and len(existing_files) >= len(input_files):
+                            self.logger.info(f"[SKIP] {original_method} on original frames already processed ({len(existing_files)} files exist, skip_existing=True)")
+                        else:
+                            # Process original frames
+                            self._run_deblur_on_directory(original_frames_dir, output_dir, original_method)
                     else:
-                        # For Restormer and Uformer, use conda run with specific environment
-                        cmd = ["conda", "run", "-n", method_config['conda_env'], "python",
-                               str(module_path),
-                               "--input_dir", str(input_dir),
-                               "--output_dir", str(output_dir)]
-                    
-                    # Set PYTHONPATH to include project root
-                    import os
-                    env = os.environ.copy()
-                    env['PYTHONPATH'] = str(self.base_dir)
-                    
-                    # Run the module with real-time output (no capture_output=True)
-                    self.logger.info(f"Executing: {' '.join(cmd)}")
-                    self.logger.info(f"Conda environment: {method_config['conda_env']}")
-                    self.logger.info(f"Output directory: {output_dir}")
-                    
-                    # Use Popen for real-time output
-                    process = subprocess.Popen(
-                        cmd, 
-                        stdout=subprocess.PIPE, 
-                        stderr=subprocess.STDOUT,
-                        text=True, 
-                        cwd=self.base_dir, 
-                        env=env,
-                        bufsize=1,
-                        universal_newlines=True,
-                        shell=(method_config['conda_env'] != 'base')  # Use shell for conda run commands
-                    )
-                    
-                    # Stream output in real-time
-                    output_lines = []
-                    for line in iter(process.stdout.readline, ''):
-                        if line.strip():  # Only print non-empty lines
-                            print(f"[{method}] {line.rstrip()}")  # Print to console immediately
-                            output_lines.append(line)
-                    
-                    # Wait for process to complete
-                    return_code = process.wait()
-                    
-                    if return_code == 0:
-                        self.logger.info(f"[OK] {method} on {blur_method_name} processing completed")
-                        self.logger.info(f"Results saved to: {output_dir}")
-                        
-                        # Verify output files were created
-                        output_files = list(output_dir.glob("*.png")) + list(output_dir.glob("*.jpg"))
-                        self.logger.info(f"Generated {len(output_files)} output files")
-                        
-                    else:
-                        self.logger.error(f"{method} on {blur_method_name} processing failed with return code {return_code}")
-                        
-                        # Check for common conda environment issues
-                        if method_config['conda_env'] != 'base':
-                            if "No module named" in ''.join(output_lines):
-                                self.logger.error(f"Missing dependencies in conda environment '{method_config['conda_env']}'")
-                                self.logger.error(f"Try running: conda activate {method_config['conda_env']} && pip install <missing_package>")
-                            elif "conda: command not found" in ''.join(output_lines):
-                                self.logger.error("Conda is not available in PATH. Make sure conda is properly installed.")
-                            elif f"Could not find conda environment: {method_config['conda_env']}" in ''.join(output_lines):
-                                self.logger.error(f"Conda environment '{method_config['conda_env']}' does not exist")
-                                self.logger.error(f"Available environments: vapor, restormer, uformer, mprnet, dpir")
-                        
-                        # Log the captured output for debugging
-                        if output_lines:
-                            self.logger.error(f"Output: {''.join(output_lines[-10:])}")  # Last 10 lines
-                        self.logger.warning(f"Continuing with next method...")
-                        continue
+                        # Process original frames
+                        self._run_deblur_on_directory(original_frames_dir, output_dir, original_method)
             
             return True
                     
@@ -463,7 +508,7 @@ class VAPORCompletePipeline:
             return_code = process.wait()
             
             if return_code == 0:
-                self.logger.info("3D reconstruction completed successfully")
+                self.logger.info("[OK] 3D reconstruction completed successfully")
                 return True
             else:
                 self.logger.error(f"3D reconstruction failed with return code {return_code}")
@@ -473,62 +518,59 @@ class VAPORCompletePipeline:
         except Exception as e:
             self.logger.error(f"Error running 3D reconstruction: {e}")
             return True  # Don't fail entire pipeline
-            
-    def generate_final_report(self):
-        """Generate a comprehensive analysis report."""
-        self.logger.info("Generating final analysis report...")
-        
+    
+    def run_registration(self):
+        """Run point cloud registration and comparison."""
         try:
-            report_dir = self.base_dir / "data" / "reports"
-            report_dir.mkdir(parents=True, exist_ok=True)
+            # Check if reconstruction was skipped
+            if self.skip_reconstruction:
+                self.logger.info("Skipping registration (reconstruction was skipped)")
+                return True
             
-            report_file = report_dir / f"{self.video_stem}_complete_analysis_report.txt"
+            # Check if ground truth exists
+            gt_patterns = [
+                f"{self.video_stem.split('_')[0]}_{self.video_stem.split('_')[1]}_segmentation.ply",
+                "ground_truth.ply"
+            ]
             
-            with open(report_file, 'w') as f:
-                f.write(f"VAPOR Complete Analysis Report\n")
-                f.write(f"Video: {self.video_name}\n")
-                f.write(f"Generated: {datetime.now().isoformat()}\n")
-                f.write(f"{'='*60}\n\n")
-                
-                # Check what was generated
-                frames_dir = self.base_dir / "data" / "frames"
-                metrics_dir = self.base_dir / "data" / "metrics" / self.video_stem
-                point_clouds_dir = self.base_dir / "data" / "point_clouds" / self.video_stem
-                
-                f.write("Generated Data:\n")
-                f.write(f"- Original frames: {self._count_files(frames_dir / 'original' / self.video_stem, '*.png')} files\n")
-                f.write(f"- Blurred frame sets: {self._count_directories(frames_dir / 'blurred' / self.video_stem)} sets\n")
-                f.write(f"- Metrics files: {self._count_files(metrics_dir, '*.csv')} CSV files\n")
-                f.write(f"- Point clouds: {self._count_files(point_clouds_dir, '*.ply', recursive=True)} PLY files\n")
-                
-                f.write(f"\nOutput Directories:\n")
-                f.write(f"- Frames: {frames_dir}\n")
-                f.write(f"- Metrics: {metrics_dir}\n")
-                f.write(f"- Point Clouds: {point_clouds_dir}\n")
-                f.write(f"- Reports: {report_dir}\n")
-                
-            self.logger.info(f"[OK] Analysis report saved: {report_file}")
-            return True
+            gt_dir = self.base_dir / "data" / "point_clouds" / self.video_stem
+            ground_truth_path = None
             
+            for pattern in gt_patterns:
+                test_path = gt_dir / pattern
+                if test_path.exists():
+                    ground_truth_path = test_path
+                    break
+            
+            if not ground_truth_path:
+                self.logger.warning(f"Ground truth PLY not found in {gt_dir}, skipping registration")
+                self.logger.info(f"Looked for: {gt_patterns}")
+                return True
+            
+            self.logger.info(f"Ground truth found: {ground_truth_path}")
+            
+            self.logger.info("")
+            self.logger.info("="*80)
+            self.logger.info("POINT CLOUD REGISTRATION REQUIRES INITIAL TRANSFORMATION")
+            self.logger.info("="*80)
+            self.logger.info("")
+            self.logger.info("The ICP registration step requires an initial transformation matrix.")
+            self.logger.info("Please create:")
+            self.logger.info(f"  {self.data_manager.point_clouds_dir}/registration/initial_transformation.txt")
+            self.logger.info("")
+            self.logger.info("See INITIAL_TRANSFORMATION_SETUP.md for detailed instructions.")
+            self.logger.info("")
+            self.logger.info("To proceed with registration, run:")
+            self.logger.info(f"  python reconstruction/registration_calculator.py \\")
+            self.logger.info(f"    --video {self.video_stem} \\")
+            self.logger.info(f"    --run run_{self.run_id}")
+            self.logger.info("")
+            self.logger.info("="*80)
+                
         except Exception as e:
-            self.logger.error(f"Error generating report: {e}")
-            return False
-            
-    def _count_files(self, directory: Path, pattern: str, recursive: bool = False):
-        """Count files matching pattern in directory."""
-        if not directory.exists():
-            return 0
-        if recursive:
-            return len(list(directory.rglob(pattern)))
-        else:
-            return len(list(directory.glob(pattern)))
-            
-    def _count_directories(self, directory: Path):
-        """Count subdirectories."""
-        if not directory.exists():
-            return 0
-        return len([d for d in directory.iterdir() if d.is_dir()])
-        
+            self.logger.error(f"Error in registration step: {e}")
+            return True  # Don't fail entire pipeline
+    
     def run_complete_pipeline(self):
         """Run the complete VAPOR analysis pipeline."""
         self.logger.info("VAPOR Pipeline Starting - %s", self.video_name)
@@ -560,10 +602,11 @@ class VAPORCompletePipeline:
         self.logger.info("[4/5] Running 3D reconstruction...")
         if not self.run_3d_reconstruction():
             self.logger.warning("3D reconstruction issues, continuing...")
-            
-        # Step 5: Generate report
-        self.logger.info("[5/5] Generating final report...")
-        self.generate_final_report()
+        
+        # Step 5: Point cloud registration
+        self.logger.info("[5/5] Running point cloud registration...")
+        if not self.run_registration():
+            self.logger.warning("Registration issues, continuing...")
         
         self.logger.info("VAPOR Pipeline Completed Successfully")
         return True
@@ -594,6 +637,12 @@ def main():
         action="store_true",
         help="Skip 3D reconstruction"
     )
+    parser.add_argument(
+        "--manual-crop",
+        action="store_true",
+        help="Use interactive manual crop selection (select 4 corners on 3 frames)"
+    )
+    # Removed interactive crop option
     
     args = parser.parse_args()
     
@@ -602,7 +651,8 @@ def main():
         video_name=args.video,
         skip_blur=args.skip_blur,
         skip_metrics=args.skip_metrics,
-        skip_reconstruction=args.skip_reconstruction
+        skip_reconstruction=args.skip_reconstruction,
+        manual_crop=args.manual_crop
     )
     
     success = pipeline.run_complete_pipeline()

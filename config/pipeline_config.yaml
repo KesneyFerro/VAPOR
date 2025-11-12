@@ -15,7 +15,7 @@ pipeline:
     reconstruction: false
   
   # Skip already processed data (if false, will reprocess everything)
-  skip_existing: true  # Set to false to force reprocess blur/deblur even if output exists
+  skip_existing: false  # Set to false to force reprocess blur/deblur even if output exists
 
 # Video Processing Settings
 video:
@@ -25,9 +25,9 @@ video:
   # Video time cropping settings (optional - crop video before frame extraction)
   time_crop:
     enabled: true        # Enable time cropping
-    start_time: 50.0     # Start time in seconds (start at 50 seconds)
+    start_time: 40.0     # Start time in seconds
     end_time: null       # End time in seconds (null = use duration instead)
-    duration: 30.0       # Duration in seconds (30s for analysis)
+    duration: 20.0       # Duration in seconds
   
   # Frame extraction settings
   frame_extraction:
@@ -74,6 +74,10 @@ deblur:
     - "Restormer"
     - "Uformer"
     - "MPRNet"
+  
+  # Apply deblur to original frames (in addition to blurred frames)
+  process_original_frames: true  # If true, also run Restormer on original frames
+  original_deblur_method: "Restormer"  # Which method to use on original frames
   
   # For test mode, run selected methods
   test_mode:

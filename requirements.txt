@@ -26,8 +26,9 @@ piq>=0.7.0  # PyTorch Image Quality - PSNR, SSIM, MS-SSIM
 torch>=1.9.0  # Required for piq and pyiqa
 torchvision>=0.10.0  # Required for piq and pyiqa
 
-# For 3D reconstruction (optional - may need conda install)
+# For 3D reconstruction and registration
 # pycolmap  # Install via: conda install -c conda-forge pycolmap
+open3d>=0.17.0  # Point cloud processing and registration
 
 # Deep learning frameworks (optional - for deblur methods)
 # tensorflow>=2.8.0

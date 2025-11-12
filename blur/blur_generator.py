@@ -32,7 +32,9 @@ from blur.metrics.sharpness import SharpnessMetrics
 class BlurGenerator:
     """Generates blurred frames from original video with various blur effects."""
     
-    def __init__(self, video_name: str, stride: int = 1, max_frames: int = None, blur_types: List[str] = None, intensities: List[str] = None, force_regenerate: bool = False, generate_videos: bool = False, start_time: float = None, duration: float = None):
+    def __init__(self, video_name: str, stride: int = 1, max_frames: int = None, blur_types: List[str] = None, 
+                 intensities: List[str] = None, force_regenerate: bool = False, generate_videos: bool = False, 
+                 start_time: float = None, duration: float = None, manual_crop: bool = False):
         """Initialize the pipeline.
         
         Args:
@@ -45,6 +47,7 @@ class BlurGenerator:
             generate_videos: If True, generate videos from processed frames (default: False)
             start_time: Start time in seconds for video cropping (None = from beginning)
             duration: Duration in seconds for video cropping (None = full video)
+            manual_crop: If True, use manual 4-corner or two-point crop selection
         """
         self.video_name = video_name
         self.stride = stride
@@ -53,6 +56,7 @@ class BlurGenerator:
         self.generate_videos = generate_videos
         self.start_time = start_time
         self.duration = duration
+        self.manual_crop = manual_crop
         
         # Setup paths manually
         self.base_dir = Path(__file__).parent.parent
@@ -62,10 +66,12 @@ class BlurGenerator:
         self.frames_base = self.base_dir / "data" / "frames"
         self.frames_original = self.frames_base / "original" / Path(video_name).stem
         self.frames_blurred = self.frames_base / "blurred" / Path(video_name).stem
-        self.videos_blurred = self.base_dir / "data" / "videos" / "blurred"
         
         # Create directories
         self._ensure_directories_exist()
+        
+        # Manual crop will be set up interactively if enabled (no config file needed)
+        self.manual_crop_bounds = None
         
         # Clean existing blurred frames if force regenerate is enabled
         if self.force_regenerate:
@@ -99,7 +105,6 @@ class BlurGenerator:
         self.frames_base.mkdir(parents=True, exist_ok=True)
         self.frames_original.mkdir(parents=True, exist_ok=True)
         self.frames_blurred.mkdir(parents=True, exist_ok=True)
-        self.videos_blurred.mkdir(parents=True, exist_ok=True)
     
     def _clean_existing_blurred_frames(self):
         """Clean existing blurred frame directories for force regenerate."""
@@ -151,9 +156,148 @@ class BlurGenerator:
                     shutil.rmtree(subdir)
         
         print(f"Frame directories cleaned for fresh processing")
+    
+    def _find_content_bounds_rectangular(self, frame: np.ndarray) -> Tuple[int, int, int, int]:
+        """
+        Find the rectangular bounds of non-black content using strict black detection.
+        Only pure black pixels (0,0,0) are considered as borders.
+        
+        Sweeps from each edge (top, bottom, left, right) to find content boundaries.
+        
+        Args:
+            frame: Input frame (BGR)
+            
+        Returns:
+            tuple: (top, left, bottom, right) - matching crop_to_content format
+                   These are indices for numpy slicing: frame[top:bottom+1, left:right+1]
+        """
+        h, w = frame.shape[:2]
+        
+        # Create a mask where True = pure black (all channels are 0)
+        black_mask = np.all(frame == 0, axis=2)
+        
+        # SWEEP FROM TOP TO BOTTOM
+        # Find first row (from top) that has any non-black pixel
+        top = 0
+        for y in range(h):
+            if not np.all(black_mask[y, :]):  # If this row has any non-black pixel
+                top = y
+                break
+        else:
+            # Entire frame is black
+            return (0, 0, h - 1, w - 1)
+        
+        # SWEEP FROM BOTTOM TO TOP
+        # Find first row (from bottom) that has any non-black pixel
+        bottom = h - 1
+        for y in range(h - 1, -1, -1):
+            if not np.all(black_mask[y, :]):  # If this row has any non-black pixel
+                bottom = y
+                break
+        
+        # SWEEP FROM LEFT TO RIGHT
+        # Find first column (from left) that has any non-black pixel
+        left = 0
+        for x in range(w):
+            if not np.all(black_mask[:, x]):  # If this column has any non-black pixel
+                left = x
+                break
+        
+        # SWEEP FROM RIGHT TO LEFT
+        # Find first column (from right) that has any non-black pixel
+        right = w - 1
+        for x in range(w - 1, -1, -1):
+            if not np.all(black_mask[:, x]):  # If this column has any non-black pixel
+                right = x
+                break
+        
+        # Return in the format expected by crop_to_content: (top, left, bottom, right)
+        # These can be used directly as: frame[top:bottom+1, left:right+1]
+        return (top, left, bottom, right)
         
     def detect_crop_bounds(self) -> Optional[Tuple]:
-        """Detect crop bounds for the video using improved frame sampling strategy."""
+        """Detect crop bounds for the video using improved frame sampling strategy or manual selection."""
+        # If manual crop is enabled, use interactive selection
+        if self.manual_crop:
+            print("\n[MANUAL CROP] Interactive crop selection...")
+            print("You will select TOP-LEFT and BOTTOM-RIGHT points on 3 frames. The average will be used for all frames.")
+
+            cap = cv2.VideoCapture(str(self.video_path))
+            if not cap.isOpened():
+                print("  [ERROR] Could not open video for manual crop")
+                return None
+
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if self.start_time is not None:
+                start_frame = max(0, int(self.start_time * fps))
+            else:
+                start_frame = 0
+            sample_indices = [
+                start_frame,
+                start_frame + 30,
+                start_frame + 60
+            ]
+            sample_indices = [idx for idx in sample_indices if idx < total_frames]
+
+            crop_points = []
+            for idx in sample_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                print(f"Select crop for frame {idx} (TOP-LEFT then BOTTOM-RIGHT)")
+                points = []
+                h, w = frame.shape[:2]
+                max_dim = 900
+                scale = min(max_dim / h, max_dim / w, 1.0)
+                disp_frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA) if scale < 1.0 else frame.copy()
+                clone = disp_frame.copy()
+                window_name = f"Crop Selection Frame {idx}"
+                def mouse_callback(event, x, y, flags, param):
+                    nonlocal points, clone
+                    if event == cv2.EVENT_LBUTTONDOWN:
+                        if len(points) < 2:
+                            points.append((x, y))
+                            cv2.circle(clone, (x, y), 6, (0, 255, 0), -1)
+                            cv2.imshow(window_name, clone)
+                        if len(points) == 2:
+                            cv2.rectangle(clone, points[0], points[1], (0, 255, 0), 2)
+                            cv2.imshow(window_name, clone)
+                cv2.namedWindow(window_name)
+                cv2.setMouseCallback(window_name, mouse_callback)
+                cv2.imshow(window_name, clone)
+                print("Click TOP-LEFT then BOTTOM-RIGHT. Press ENTER when done.")
+                while True:
+                    key = cv2.waitKey(0)
+                    if key == 13 or key == 10:
+                        break
+                    if key == 27:
+                        cv2.destroyAllWindows()
+                        sys.exit(0)
+                cv2.destroyAllWindows()
+                if len(points) == 2:
+                    # Map points back to original image size
+                    mapped = [(int(x / scale), int(y / scale)) for (x, y) in points]
+                    crop_points.append(mapped)
+            cap.release()
+            if not crop_points:
+                print("  [ERROR] No crop points selected.")
+                return None
+            # Average crop bounds
+            lefts, tops, rights, bottoms = [], [], [], []
+            for (x1, y1), (x2, y2) in crop_points:
+                lefts.append(min(x1, x2))
+                rights.append(max(x1, x2))
+                tops.append(min(y1, y2))
+                bottoms.append(max(y1, y2))
+            avg_left = int(np.mean(lefts))
+            avg_right = int(np.mean(rights))
+            avg_top = int(np.mean(tops))
+            avg_bottom = int(np.mean(bottoms))
+            self.manual_crop_bounds = (avg_top, avg_left, avg_bottom, avg_right)
+            print(f"  [OK] Manual crop bounds: ({avg_left}, {avg_top}, {avg_right}, {avg_bottom})")
+            return self.manual_crop_bounds
         print("\n[STEP 1] Detecting optimal crop bounds with enhanced sampling...")
         
         cap = cv2.VideoCapture(str(self.video_path))
@@ -197,16 +341,27 @@ class BlurGenerator:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
             ret, frame = cap.read()
             if ret:
+                frame_h, frame_w = frame.shape[:2]
+                
                 # Calculate frame brightness/contrast as quality metric
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 mean_brightness = np.mean(gray)
                 brightness_std = np.std(gray)
                 
-                bounds = find_content_bounds_diagonal(frame)
-                if bounds != (0, 0, frame.shape[1], frame.shape[0]):  # Not full frame
+                # Use simple rectangular crop that only considers pure black (0,0,0)
+                bounds = self._find_content_bounds_rectangular(frame)
+                # bounds format is (top, left, bottom, right)
+                # Full frame would be (0, 0, height-1, width-1)
+                
+                print(f"    Frame {frame_num} ({frame_w}x{frame_h}): bounds=(t:{bounds[0]}, l:{bounds[1]}, b:{bounds[2]}, r:{bounds[3]})")
+                
+                if bounds != (0, 0, frame_h - 1, frame_w - 1):  # Not full frame
                     # Calculate content area
-                    content_area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
-                    total_area = frame.shape[0] * frame.shape[1]
+                    # bounds = (top, left, bottom, right)
+                    content_width = bounds[3] - bounds[1] + 1
+                    content_height = bounds[2] - bounds[0] + 1
+                    content_area = content_width * content_height
+                    total_area = frame_h * frame_w
                     area_ratio = content_area / total_area
                     
                     valid_bounds.append({
@@ -219,7 +374,9 @@ class BlurGenerator:
                     })
                     frame_areas.append(content_area)
                     
-                    print(f"    Frame {frame_num}: area={content_area}, ratio={area_ratio:.3f}, brightness={mean_brightness:.1f}")
+                    print(f"      -> Content: {content_width}x{content_height} ({area_ratio:.1%} of frame)")
+                else:
+                    print(f"      -> No black borders detected (full frame)")
         
         cap.release()
         
@@ -350,22 +507,25 @@ class BlurGenerator:
     def _calculate_final_bounds(self, bounds_data: List[Dict]) -> Tuple[int, int, int, int]:
         """
         Calculate final crop bounds from filtered frame data.
+        Uses the most restrictive bounds to ensure all black borders are removed.
         
         Args:
-            bounds_data: List of frame data with bounds
+            bounds_data: List of frame data with bounds in format (top, left, bottom, right)
             
         Returns:
-            Final crop bounds tuple
+            Final crop bounds tuple (top, left, bottom, right)
         """
         # Use the most restrictive bounds (smallest area that still contains content)
         all_bounds = [frame['bounds'] for frame in bounds_data]
         
-        min_top = max(b[0] for b in all_bounds)
-        min_left = max(b[1] for b in all_bounds)
-        max_bottom = min(b[2] for b in all_bounds)
-        max_right = min(b[3] for b in all_bounds)
+        # bounds format is (top, left, bottom, right)
+        # Most restrictive = max of tops, max of lefts, min of bottoms, min of rights
+        final_top = max(b[0] for b in all_bounds)
+        final_left = max(b[1] for b in all_bounds)
+        final_bottom = min(b[2] for b in all_bounds)
+        final_right = min(b[3] for b in all_bounds)
         
-        return (min_top, min_left, max_bottom, max_right)
+        return (final_top, final_left, final_bottom, final_right)
     
     def extract_and_process_frames(self) -> bool:
         """Extract frames and apply blur effects."""
@@ -471,48 +631,6 @@ class BlurGenerator:
         print(f"  [OK] Processed {processed_count} frames")
         return processed_count > 0
     
-    def create_videos(self) -> int:
-        """Create videos from processed frames."""
-        print("\n[STEP 3] Creating videos from frames...")
-        
-        success_count = 0
-        total_count = len(self.blur_types) * len(self.intensities)
-        
-        # Create video reconstructor
-        reconstructor = VideoReconstructor(str(self.video_path))
-        
-        for blur_type in self.blur_types:
-            for intensity in self.intensities:
-                dir_name = f"{blur_type}_{intensity}"
-                frames_dir = self.frames_blurred / dir_name
-                
-                if not frames_dir.exists():
-                    print(f"    [SKIP] {dir_name}: No frames directory")
-                    continue
-                
-                # Get frame files
-                frame_files = get_image_files(frames_dir)
-                if not frame_files:
-                    print(f"    [SKIP] {dir_name}: No frames found")
-                    continue
-                
-                # Output video name
-                output_filename = f"{Path(self.video_name).stem}_{blur_type}_{intensity}.mp4"
-                output_path = self.videos_blurred / output_filename
-                
-                try:
-                    # Create video
-                    if reconstructor.create_video(str(frames_dir), str(output_path)):
-                        print(f"    [OK] {output_filename}")
-                        success_count += 1
-                    else:
-                        print(f"    [FAILED] {output_filename}")
-                except Exception as e:
-                    print(f"    [ERROR] {output_filename}: {e}")
-        
-        print(f"  [OK] Created {success_count}/{total_count} videos")
-        return success_count
-    
     def calculate_metrics(self) -> bool:
         """Metrics calculation is now handled by the main pipeline through metrics_calculator.py"""
         print("\n[STEP 4] Metrics calculation handled by main pipeline")
@@ -544,13 +662,6 @@ class BlurGenerator:
                 print("[ERROR] Frame processing failed")
                 return False
             
-            # Create videos only if enabled
-            video_count = 0
-            if self.generate_videos:
-                video_count = self.create_videos()
-            else:
-                print("\n[STEP 3] Video generation disabled (generate_videos=False)")
-            
             # Calculate metrics
             self.calculate_metrics()
             
@@ -558,11 +669,6 @@ class BlurGenerator:
             print("\n" + "=" * 60)
             print("[SUCCESS] PIPELINE COMPLETED!")
             print("=" * 60)
-            if self.generate_videos:
-                print(f"Videos created: {video_count}")
-                print(f"Videos directory: {self.videos_blurred}")
-            else:
-                print("Video generation: Disabled")
             print(f"Frames directory: {self.frames_base}")
             
             return True
@@ -620,6 +726,12 @@ def main():
         default=None,
         help="Duration in seconds for video cropping (default: full video)"
     )
+    parser.add_argument(
+        "--manual-crop",
+        action="store_true",
+        help="Use manual 4-corner crop selection from config/manual_crop.json"
+    )
+    # Removed interactive crop option
     
     args = parser.parse_args()
     
@@ -628,7 +740,8 @@ def main():
         print("Error: Stride must be between 1 and 100")
         return 1
     
-    pipeline = BlurGenerator(args.video, args.stride, args.max_frames, args.blur_types, args.intensities, start_time=args.start_time, duration=args.duration)
+    pipeline = BlurGenerator(args.video, args.stride, args.max_frames, args.blur_types, args.intensities, 
+                            start_time=args.start_time, duration=args.duration, manual_crop=args.manual_crop)
     success = pipeline.run_pipeline()
     return 0 if success else 1
 

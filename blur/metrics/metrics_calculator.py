@@ -520,13 +520,19 @@ class VAPORMetricsCalculator:
         
         This preserves ALL per-frame data for detailed analysis.
         Files are organized by frame type in the metrics directory.
+        Redundant columns (method, blur_type, intensity, deblur_method) are removed
+        as this information is already stored in the JSON files.
         """
         
+        # Remove redundant columns that are already in JSON
+        columns_to_remove = ['method', 'blur_type', 'intensity', 'deblur_method']
+        df_clean = df.drop(columns=[col for col in columns_to_remove if col in df.columns], errors='ignore')
+        
         # Save detailed metrics by type
-        frame_types = df['frame_type'].unique()
+        frame_types = df_clean['frame_type'].unique()
         
         for frame_type in frame_types:
-            type_df = df[df['frame_type'] == frame_type]
+            type_df = df_clean[df_clean['frame_type'] == frame_type]
             
             if frame_type == 'original':
                 output_dir = self.metrics_original
@@ -543,7 +549,7 @@ class VAPORMetricsCalculator:
         
         # Save overall comprehensive per-frame metrics
         overall_detailed = self.metrics_base / f"{self.video_stem}_all_frames_detailed.csv"
-        df.to_csv(overall_detailed, index=False)
+        df_clean.to_csv(overall_detailed, index=False)
     
     def _save_summary_csv(self, df: pd.DataFrame):
         """Save summary statistics to CSV files (standalone mode).
