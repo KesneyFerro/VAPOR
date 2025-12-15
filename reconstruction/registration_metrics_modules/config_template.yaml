@@ -1,0 +1,43 @@
+# 3D Reconstruction QA Configuration Template
+# Copy this file and customize for your needs
+
+paths:
+  data_root: "data"
+  point_clouds_subdir: "point_clouds"
+  metrics_subdir: "metrics"
+  logs_subdir: "logs"
+
+ct_mesh:
+  clean_mesh: true
+  remove_duplicates: true
+  remove_degenerates: true
+
+roi:
+  method: "proximity"  # Options: "proximity" or "frusta"
+  distance_multiplier: 5.0  # ROI = points within distance_multiplier * h
+
+distance_metrics:
+  threshold_multipliers: [1.0, 2.0, 3.0]  # F-score thresholds as multiples of h
+  poisson_disk_sampling: true
+  poisson_init_factor: 5
+
+normal_consistency:
+  enabled: true
+  max_distance_multiplier: 2.0  # Only compare normals within 2h
+  knn_for_estimation: 30
+
+registration_sanity:
+  enabled: true
+  icp_threshold_multiplier: 2.0  # ICP distance threshold = 2h
+  icp_max_iterations: 50
+
+output:
+  save_distance_arrays: true
+  save_visualizations: true
+  save_json: true
+  save_csv: true
+  generate_report: true
+
+logging:
+  level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+  save_to_file: true

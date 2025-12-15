@@ -29,6 +29,8 @@ torchvision>=0.10.0  # Required for piq and pyiqa
 # For 3D reconstruction and registration
 # pycolmap  # Install via: conda install -c conda-forge pycolmap
 open3d>=0.17.0  # Point cloud processing and registration
+trimesh>=4.0.0  # Mesh topology validation and processing
+igl>=2.4.0  # libigl Python bindings for principal curvature (optional but recommended)
 
 # Deep learning frameworks (optional - for deblur methods)
 # tensorflow>=2.8.0

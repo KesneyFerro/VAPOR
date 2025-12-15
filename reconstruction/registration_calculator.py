@@ -1,6 +1,6 @@
 """
 Point Cloud Registration and Comparison Calculator for VAPOR
-ICP-based registration with required initial transformation matrix.
+Comprehensive 3D reconstruction evaluation with ICP registration and all metrics.
 """
 
 import argparse
@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime
 import json
 import csv
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -18,13 +18,25 @@ sys.path.append(str(Path(__file__).parent.parent))
 try:
     import open3d as o3d
     import numpy as np
+    import pandas as pd
 except ImportError as e:
     print(f"Error: Required library not installed: {e}")
-    print("Please install: pip install open3d numpy scipy")
+    print("Please install: pip install open3d numpy scipy pandas matplotlib")
     sys.exit(1)
 
 from reconstruction.registration_icp import ICPRegistration
 from reconstruction.registration_metrics import PointCloudMetrics
+
+# Import all comprehensive metric modules
+from registration_metrics_modules.core.ct_mesh_preprocessing import CTMeshPreprocessor
+from registration_metrics_modules.core.roi_masking import ROIMaskGenerator
+from registration_metrics_modules.core.distance_metrics import DistanceMetricsCalculator
+from registration_metrics_modules.core.normal_consistency import NormalConsistencyCalculator
+from registration_metrics_modules.core.coverage_sampling import CoverageAnalyzer
+from registration_metrics_modules.core.noise_smoothness import NoiseSmoothnessAnalyzer
+from registration_metrics_modules.core.registration_sanity import RegistrationSanityChecker
+from registration_metrics_modules.core.statistical_analysis import StatisticalAnalyzer
+from registration_metrics_modules.core.visualization import VisualizationGenerator
 
 
 class RegistrationCalculator:
@@ -80,6 +92,12 @@ class RegistrationCalculator:
         
         # Storage for CSV export
         self.all_results = []
+        
+        # Storage for comprehensive metrics (new modules)
+        self.comprehensive_metrics = {}
+        self.ct_mesh_processed = None
+        self.h = None  # Characteristic length
+        self.raycasting_scene = None
         
         # Verify ground truth exists
         if not self.ground_truth_path.exists():
@@ -401,6 +419,13 @@ class RegistrationCalculator:
             # Print summary
             self._print_summary(method_name, comparison_metrics)
             
+            # Compute comprehensive metrics using new modules (Steps 2-7, 9-10)
+            if self.ct_mesh_processed is not None:
+                method_comprehensive_dir = self.metrics_base / method_name
+                method_comprehensive_dir.mkdir(parents=True, exist_ok=True)
+                
+                self._compute_comprehensive_metrics(method_name, registered_cloud, method_comprehensive_dir)
+            
             return True
             
         except Exception as e:
@@ -567,10 +592,290 @@ class RegistrationCalculator:
         print(f"Completeness (10mm): {metrics['completeness']['threshold_10mm']['completeness_percent']:.1f}%")
         print(f"{'='*80}\n")
     
+    def _preprocess_ground_truth(self):
+        """Preprocess ground truth mesh for comprehensive metrics (Step 1)."""
+        self.logger.info("\n" + "="*80)
+        self.logger.info("STEP 1: Preprocessing Ground Truth CT Mesh")
+        self.logger.info("="*80)
+        
+        # Load CT mesh
+        ct_mesh = o3d.io.read_triangle_mesh(str(self.ground_truth_path))
+        
+        # Create output directory for CT validation
+        ct_output_dir = self.metrics_base / 'GT_sanity_check'
+        ct_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Preprocess
+        preprocessor = CTMeshPreprocessor(ct_output_dir, self.logger)
+        report = preprocessor.preprocess(ct_mesh, clean=True)
+        preprocessor.save_health_report()
+        preprocessor.save_preview()
+        
+        self.ct_mesh_processed = preprocessor.mesh
+        self.h = preprocessor.characteristic_length_h
+        self.raycasting_scene = preprocessor.raycasting_scene
+        
+        self.logger.info(f"✓ Characteristic length h = {self.h*1000:.3f} mm")
+        self.logger.info(f"✓ CT mesh preprocessed: {len(self.ct_mesh_processed.vertices)} vertices")
+    
+    def _compute_comprehensive_metrics(self, method_name: str, registered_cloud: o3d.geometry.PointCloud, 
+                                      method_output_dir: Path):
+        """
+        Compute comprehensive metrics using all new modules (Steps 2-7, 9-10).
+        
+        Args:
+            method_name: Name of the method
+            registered_cloud: Registered point cloud
+            method_output_dir: Output directory for this method
+        """
+        self.logger.info(f"\n{'='*80}")
+        self.logger.info(f"Computing Comprehensive Metrics: {method_name}")
+        self.logger.info(f"{'='*80}")
+        
+        metrics = {}
+        
+        # Step 2: Generate ROI
+        self.logger.info(f"\n--- Step 2: ROI Generation ---")
+        roi_generator = ROIMaskGenerator(method_output_dir, self.h, self.logger)
+        roi_mask = roi_generator.generate_proximity_based_roi(self.ct_mesh_processed, registered_cloud)
+        roi_mesh = roi_generator.extract_roi_mesh(self.ct_mesh_processed, roi_mask)
+        roi_samples = roi_generator.sample_roi_poisson_disk(roi_mesh)
+        roi_generator.save_roi_mask(method_name)
+        roi_generator.save_roi_visualization(self.ct_mesh_processed, roi_mask, method_name)
+        
+        metrics['roi_info'] = roi_generator.roi_info
+        
+        # Step 3: Distance Metrics
+        self.logger.info(f"\n--- Step 3: Distance Metrics ---")
+        dist_calc = DistanceMetricsCalculator(method_output_dir, self.h, self.logger)
+        dist_metrics = dist_calc.compute_all_metrics(
+            registered_cloud, self.raycasting_scene, roi_samples,
+            thresholds=[self.h, 2*self.h, 3*self.h]
+        )
+        dist_calc.save_distance_arrays(method_name)
+        dist_calc.save_metrics_table(method_name)
+        
+        metrics['distance_metrics'] = dist_metrics
+        
+        # Step 4: Normal Consistency
+        self.logger.info(f"\n--- Step 4: Normal Consistency ---")
+        normal_calc = NormalConsistencyCalculator(method_output_dir, self.h, self.logger)
+        normal_stats = normal_calc.compute_normal_consistency(
+            registered_cloud, self.ct_mesh_processed, self.raycasting_scene
+        )
+        normal_calc.save_results(method_name)
+        
+        metrics['normal_consistency'] = normal_stats
+        
+        # Step 5: Coverage & Sampling
+        self.logger.info(f"\n--- Step 5: Coverage & Sampling ---")
+        coverage_analyzer = CoverageAnalyzer(method_output_dir, self.h, self.logger)
+        
+        coverage_results = coverage_analyzer.compute_coverage_at_thresholds(
+            roi_samples, registered_cloud, [self.h, 2*self.h, 3*self.h]
+        )
+        
+        observed_area = coverage_analyzer.compute_observed_area(
+            self.ct_mesh_processed, roi_mask, dist_calc.s2p_distances
+        )
+        
+        holes = coverage_analyzer.analyze_holes(
+            self.ct_mesh_processed, roi_mask, dist_calc.s2p_distances
+        )
+        
+        density = coverage_analyzer.compute_density_uniformity(
+            roi_mesh, registered_cloud
+        )
+        
+        coverage_results_all = {
+            'coverage': coverage_results,
+            'observed_area': observed_area,
+            'holes': holes,
+            'density': density,
+        }
+        coverage_analyzer.save_results(method_name, coverage_results_all)
+        
+        metrics['coverage_sampling'] = coverage_results_all
+        
+        # Step 6: Noise & Smoothness
+        self.logger.info(f"\n--- Step 6: Noise & Smoothness ---")
+        smoothness_analyzer = NoiseSmoothnessAnalyzer(method_output_dir, self.logger)
+        
+        roughness, roughness_stats = smoothness_analyzer.compute_local_roughness(registered_cloud)
+        shape_descriptors = smoothness_analyzer.compute_shape_descriptors(registered_cloud)
+        smoothness_analyzer.save_results(method_name, roughness, roughness_stats, shape_descriptors)
+        
+        metrics['noise_smoothness'] = {
+            'roughness': roughness_stats,
+            'shape_descriptors': shape_descriptors,
+        }
+        
+        # Step 7: Registration Sanity
+        self.logger.info(f"\n--- Step 7: Registration Sanity Check ---")
+        reg_checker = RegistrationSanityChecker(method_output_dir, self.h, self.logger)
+        reg_stats = reg_checker.run_icp_sanity_check(registered_cloud, roi_mesh)
+        reg_checker.save_results(method_name, reg_stats)
+        
+        metrics['registration_sanity'] = reg_stats
+        
+        # Step 9: Statistical Analysis
+        self.logger.info(f"\n--- Step 9: Statistical Analysis ---")
+        stats_analyzer = StatisticalAnalyzer(method_output_dir, self.logger)
+        
+        bootstrap_p2s = stats_analyzer.bootstrap_confidence_intervals(dist_calc.p2s_distances)
+        bootstrap_s2p = stats_analyzer.bootstrap_confidence_intervals(dist_calc.s2p_distances)
+        
+        bootstrap_results = {
+            'p2s_bootstrap_ci': bootstrap_p2s,
+            's2p_bootstrap_ci': bootstrap_s2p,
+        }
+        stats_analyzer.save_results(method_name, bootstrap_results)
+        
+        metrics['statistical_analysis'] = bootstrap_results
+        
+        # Step 10: Visualizations
+        self.logger.info(f"\n--- Step 10: Visualizations ---")
+        viz_gen = VisualizationGenerator(method_output_dir, self.logger)
+        
+        viz_gen.generate_distance_heatmap(
+            registered_cloud, dist_calc.p2s_distances, 
+            f'p2s_{method_name}', max_distance=3*self.h
+        )
+        
+        viz_gen.generate_histogram(
+            dist_calc.p2s_distances, f'p2s_{method_name}',
+            title=f'P2S Distance Distribution - {method_name}'
+        )
+        
+        viz_gen.generate_histogram(
+            dist_calc.s2p_distances, f's2p_{method_name}',
+            title=f'S2P Distance Distribution - {method_name}'
+        )
+        
+        self.comprehensive_metrics[method_name] = metrics
+        self.logger.info(f"✓ Comprehensive metrics complete for {method_name}")
+        
+        return metrics
+    
+    def _generate_comprehensive_report(self):
+        """Generate comprehensive markdown report (Step 11)."""
+        self.logger.info("\n" + "="*80)
+        self.logger.info("STEP 11: Generating Comprehensive Report")
+        self.logger.info("="*80)
+        
+        report_path = self.metrics_base / 'comprehensive_report.md'
+        
+        with open(report_path, 'w') as f:
+            f.write("# VAPOR 3D Reconstruction Comprehensive Metrics Report\n\n")
+            f.write(f"**Video:** {self.video_name}  \n")
+            f.write(f"**Run:** {self.run_name}  \n")
+            f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  \n")
+            f.write(f"**Characteristic Length (h):** {self.h*1000:.3f} mm  \n\n")
+            
+            f.write("---\n\n")
+            
+            # Per-method comprehensive summaries
+            for method_name, metrics in self.comprehensive_metrics.items():
+                dist_metrics = metrics['distance_metrics']
+                
+                f.write(f"## {method_name}\n\n")
+                f.write(f"**ROI Coverage:** {metrics['roi_info']['roi_percentage']:.1f}%  \n")
+                f.write(f"**Points:** {dist_metrics['n_reconstruction_points']:,}  \n\n")
+                
+                f.write("### Distance Metrics\n\n")
+                f.write(f"- P2S Median: {dist_metrics['p2s_statistics']['median']*1000:.3f} mm\n")
+                f.write(f"- P2S Mean: {dist_metrics['p2s_statistics']['mean']*1000:.3f} mm\n")
+                f.write(f"- P2S P95: {dist_metrics['p2s_statistics']['p95']*1000:.3f} mm\n")
+                f.write(f"- S2P Median: {dist_metrics['s2p_statistics']['median']*1000:.3f} mm\n")
+                f.write(f"- Chamfer: {dist_metrics['chamfer']['chamfer_distance']:.8f}\n")
+                f.write(f"- HD95: {dist_metrics['hausdorff']['hd95']*1000:.3f} mm\n")
+                f.write(f"- ASSD: {dist_metrics['assd']['assd']*1000:.3f} mm\n\n")
+                
+                f.write("### Quality Metrics\n\n")
+                f.write(f"- Normal Consistency: {metrics['normal_consistency']['median_angle_deg']:.2f}°\n")
+                f.write(f"- ICP Fitness: {metrics['registration_sanity']['fitness']:.3f}\n")
+                f.write(f"- RMSE: {metrics['registration_sanity']['rmse_mm']:.3f} mm\n")
+                f.write(f"- Roughness: {metrics['noise_smoothness']['roughness']['median']*1000:.4f} mm\n")
+                f.write(f"- Density Gini: {metrics['coverage_sampling']['density']['gini_coefficient']:.3f}\n\n")
+                
+                f.write("### Coverage Analysis\n\n")
+                for thresh_key, thresh_data in metrics['coverage_sampling']['coverage'].items():
+                    f.write(f"- {thresh_key}: {thresh_data['coverage_percentage']:.1f}%\n")
+                f.write(f"\n- Observed Area: {metrics['coverage_sampling']['observed_area']['observed_percentage']:.1f}%\n")
+                f.write(f"- Holes Detected: {metrics['coverage_sampling']['holes']['n_holes']}\n\n")
+                
+                f.write("---\n\n")
+            
+            # Ranking
+            f.write("## Model Ranking (by P2S median)\n\n")
+            ranked = sorted(
+                self.comprehensive_metrics.items(),
+                key=lambda x: x[1]['distance_metrics']['p2s_statistics']['median']
+            )
+            
+            for rank, (method_name, metrics) in enumerate(ranked, 1):
+                p2s = metrics['distance_metrics']['p2s_statistics']['median'] * 1000
+                f.write(f"{rank}. **{method_name}** - {p2s:.3f} mm\n")
+        
+        self.logger.info(f"✓ Comprehensive report saved: {report_path}")
+    
+    def _export_comprehensive_csv(self):
+        """Export comprehensive metrics to CSV."""
+        if not self.comprehensive_metrics:
+            return
+        
+        rows = []
+        
+        for method_name, metrics in self.comprehensive_metrics.items():
+            dist_metrics = metrics['distance_metrics']
+            row = {
+                'video': self.video_name,
+                'run': self.run_name,
+                'method': method_name,
+                'n_points': dist_metrics['n_reconstruction_points'],
+                'roi_coverage_pct': metrics['roi_info']['roi_percentage'],
+                
+                # Distance metrics (mm)
+                'p2s_median_mm': dist_metrics['p2s_statistics']['median'] * 1000,
+                'p2s_mean_mm': dist_metrics['p2s_statistics']['mean'] * 1000,
+                'p2s_p95_mm': dist_metrics['p2s_statistics']['p95'] * 1000,
+                's2p_median_mm': dist_metrics['s2p_statistics']['median'] * 1000,
+                's2p_mean_mm': dist_metrics['s2p_statistics']['mean'] * 1000,
+                'chamfer': dist_metrics['chamfer']['chamfer_distance'],
+                'hd95_mm': dist_metrics['hausdorff']['hd95'] * 1000,
+                'assd_mm': dist_metrics['assd']['assd'] * 1000,
+                
+                # F-scores
+                **{f"fscore_{key}_f1": fmetrics['f1_score'] 
+                   for key, fmetrics in dist_metrics['fscores'].items()},
+                
+                # Quality metrics
+                'normal_median_deg': metrics['normal_consistency']['median_angle_deg'],
+                'normal_p95_deg': metrics['normal_consistency']['p95_angle_deg'],
+                'icp_fitness': metrics['registration_sanity']['fitness'],
+                'icp_rmse_mm': metrics['registration_sanity']['rmse_mm'],
+                'roughness_median_mm': metrics['noise_smoothness']['roughness']['median'] * 1000,
+                'density_gini': metrics['coverage_sampling']['density']['gini_coefficient'],
+                
+                # Coverage
+                'observed_area_pct': metrics['coverage_sampling']['observed_area']['observed_percentage'],
+                'n_holes': metrics['coverage_sampling']['holes']['n_holes'],
+            }
+            rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        csv_path = self.metrics_base / 'comprehensive_metrics_summary.csv'
+        df.to_csv(csv_path, index=False)
+        
+        self.logger.info(f"✓ Comprehensive CSV saved: {csv_path}")
+    
     def process_all(self):
-        """Process all reconstruction methods in the run."""
-        self.logger.info(f"Starting ICP registration for {self.video_name}/{self.run_name}")
+        """Process all reconstruction methods in the run with comprehensive metrics."""
+        self.logger.info(f"Starting comprehensive evaluation for {self.video_name}/{self.run_name}")
         self.logger.info(f"Ground truth: {self.ground_truth_path}")
+        
+        # Step 1: Preprocess ground truth (once for all methods)
+        self._preprocess_ground_truth()
         
         # Find all methods
         methods = self.find_reconstruction_methods()
@@ -587,8 +892,10 @@ class RegistrationCalculator:
             if self.process_method(method_info):
                 success_count += 1
         
-        # Export CSV summary
+        # Export summaries
         self._export_csv_summary()
+        self._export_comprehensive_csv()
+        self._generate_comprehensive_report()
         
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"PROCESSING COMPLETE")
@@ -597,16 +904,23 @@ class RegistrationCalculator:
     
     def process_single(self, method_name: str):
         """
-        Process a single reconstruction method by name.
+        Process a single reconstruction method by name with comprehensive metrics.
         
         Args:
             method_name: Name of the method to process
         """
+        # Preprocess ground truth first
+        self._preprocess_ground_truth()
+        
         methods = self.find_reconstruction_methods()
         
         for method_info in methods:
             if method_info['name'] == method_name:
-                self.process_method(method_info)
+                if self.process_method(method_info):
+                    # Export summaries for single method
+                    self._export_csv_summary()
+                    self._export_comprehensive_csv()
+                    self._generate_comprehensive_report()
                 return
         
         self.logger.error(f"Method not found: {method_name}")
@@ -615,12 +929,26 @@ class RegistrationCalculator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Register reconstructed point clouds using ICP with required initial transformation',
+        description='VAPOR Comprehensive 3D Reconstruction Evaluation with ICP Registration',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+COMPREHENSIVE EVALUATION PIPELINE (11 Steps):
+  Step 0: ICP Registration with initial transformation
+  Step 1: CT mesh preprocessing and validation
+  Step 2: ROI generation (proximity-based)
+  Step 3: Distance metrics (P2S, S2P, Chamfer, Hausdorff, F-scores, ASSD)
+  Step 4: Normal consistency analysis
+  Step 5: Coverage, holes, and density uniformity
+  Step 6: Noise and smoothness analysis
+  Step 7: Registration sanity check (ICP validation)
+  Step 8: Pairwise model comparison (if multiple methods)
+  Step 9: Statistical analysis (bootstrap CI)
+  Step 10: Visualizations (heatmaps, histograms)
+  Step 11: Comprehensive reports (CSV + Markdown)
+
 IMPORTANT: This script requires an initial transformation matrix!
 
-Before running registration, you must create initial_transformation.txt in:
+Before running, create initial_transformation.txt in:
   data/point_clouds/{video}/{run}/initial_transformation.txt
 
 The file should contain a 4x4 transformation matrix:
@@ -629,8 +957,24 @@ The file should contain a 4x4 transformation matrix:
   -0.756877481937 -0.497696936131 -1.977451205254 -81.323654174805
   0.000000000000 0.000000000000 0.000000000000 1.000000000000
 
+OUTPUT:
+  data/metrics/{video}/{run}/reconstruction_metrics/
+    ├── registration_summary_{video}_{run}.csv       # ICP & basic metrics
+    ├── comprehensive_metrics_summary.csv            # All 11-step metrics
+    ├── comprehensive_report.md                      # Detailed report
+    ├── GT_sanity_check/                            # CT validation
+    └── {method}/                                    # Per-method detailed results
+        ├── roi/                                     # ROI visualization
+        ├── distance_metrics/                        # Distance arrays & tables
+        ├── normal_consistency/                      # Normal angles
+        ├── coverage_sampling/                       # Coverage analysis
+        ├── noise_smoothness/                        # Roughness, shape descriptors
+        ├── registration_sanity/                     # ICP validation
+        ├── statistical_analysis/                    # Bootstrap CI
+        └── visualizations/                          # Heatmaps, histograms
+
 Examples:
-  # Process all methods in a run
+  # Process all methods in a run (recommended)
   python registration_calculator.py --video 4_32_slow_run_20250403_094922 --run run_20251023_071408
   
   # Process only a specific method
